@@ -5,8 +5,8 @@ import (
     "os"
 
     "golang.org/x/net/context"
-
     "github.com/dsoprea/go-logging"
+    "github.com/jessevdk/go-flags"
 
     "github.com/dsoprea/go-napster-to-spotify-sync/internal/sync"
 )
@@ -34,17 +34,31 @@ var (
     mLog = log.NewLogger("main")
 )
 
-func main() {
-    cla := log.NewConsoleLogAdapter()
-    log.AddAdapter("console", cla)
 
+type options struct {
+    SpotifyPlaylistName string  `short:"p" long:"playlist-name" description:"Spotify playlist name" required:"true"`
+    OnlyArtists []string        `short:"a" long:"only-artists" description:"One artist to import" required:"true"`
+}
+
+func readOptions() *options {
+    o := new(options)
+
+    if _, err := flags.Parse(o); err != nil {
+        log.Panic(err)
+    }
+
+    return o
+}
+
+func main() {
     ecp := log.NewEnvironmentConfigurationProvider()
     log.LoadConfiguration(ecp)
 
-// TODO(dustin): !! Logging is not working.
+    cla := log.NewConsoleLogAdapter()
+    log.AddAdapter("console", cla)
 
+    o := readOptions()
     ctx := context.Background()
-
     authC := make(chan *gnsssync.SpotifyContext)
 
     go func() {
@@ -65,7 +79,7 @@ func main() {
         mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
 
         i := gnsssync.NewImporter(ctx, NapsterApiKey, NapsterSecretKey, NapsterUsername, NapsterPassword, spotifyAuth, SpotifyApiSecretKey, ImportBatchSize)
-        if err := i.Import(); err != nil {
+        if err := i.Import(o.SpotifyPlaylistName, o.OnlyArtists); err != nil {
             log.Panic(err)
         }
 
