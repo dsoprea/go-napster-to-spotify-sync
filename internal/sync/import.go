@@ -205,9 +205,9 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
             }
 
             if found == false {
-                for _, an := range nt.ArtistNames {
+                for j, an := range nt.ArtistNames {
                     if _, found := i.artistNotices[an]; found == false {
-                        iLog.Debugf(i.ctx, "One of the artists in the track that is being skipped: %v", an)
+                        iLog.Debugf(i.ctx, "One of the artists in the track that is being skipped: (%d) %v", j, an)
                         i.artistNotices[an] = true
                     }
                 }
