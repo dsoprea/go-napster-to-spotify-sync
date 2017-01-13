@@ -5,6 +5,8 @@ import (
 
     "net/http"
 
+    "golang.org/x/net/context"
+
     "github.com/pkg/browser"
     "github.com/zmb3/spotify"
     "github.com/gorilla/mux"
@@ -28,6 +30,8 @@ var (
 
 
 type SpotifyAuthorizer struct {
+    ctx context.Context
+
     apiClientId string
     apiSecretKey string
     apiRedirectUrl string
@@ -37,8 +41,9 @@ type SpotifyAuthorizer struct {
     auth spotify.Authenticator
 }
 
-func NewSpotifyAuthorizer(apiClientId, apiSecretKey, redirectUrl, localBindUrl string, authC chan<- *SpotifyContext) *SpotifyAuthorizer {
+func NewSpotifyAuthorizer(ctx context.Context, apiClientId, apiSecretKey, redirectUrl, localBindUrl string, authC chan<- *SpotifyContext) *SpotifyAuthorizer {
     return &SpotifyAuthorizer{
+        ctx: ctx,
         apiClientId: apiClientId,
         apiSecretKey: apiSecretKey,
         apiRedirectUrl: redirectUrl,
@@ -74,7 +79,7 @@ func (sa *SpotifyAuthorizer) handleResponse(w http.ResponseWriter, r *http.Reque
 
     sa.authC <- sc
 
-    fmt.Printf("Authorization is complete.\n")
+    saLog.Debugf(sa.ctx, "Authorization is complete.")
 }
 
 func (sa *SpotifyAuthorizer) configureHttp() (err error) {

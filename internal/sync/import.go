@@ -3,6 +3,7 @@ package gnsssync
 import (
     "fmt"
     "strings"
+    "sort"
 
     "net/http"
 
@@ -12,6 +13,11 @@ import (
     "github.com/dsoprea/go-napster"
     "github.com/zmb3/spotify"
     "github.com/randomingenuity/go-ri/common"
+)
+
+// Errors
+var (
+    ErrTrackNotFoundInSpotify = fmt.Errorf("track not found in Spotify")
 )
 
 // Misc
@@ -72,6 +78,10 @@ type NormalizedTrack struct {
     TrackName string
 }
 
+func (nt NormalizedTrack) String() string {
+    return fmt.Sprintf("TRACK<%v [%s] [%s]>", nt.ArtistNames, nt.AlbumName, nt.TrackName)
+}
+
 func (nt *NormalizedTrack) Hash() string {
     parts := append([]string {}, nt.AlbumName, nt.TrackName)
     parts = append(parts, nt.ArtistNames...)
@@ -104,46 +114,90 @@ func (i *Importer) getSpotifyTrackId(nnt *NormalizedTrack) (id spotify.ID, err e
         }
     }()
 
-    sr, err := i.spotifyAuth.Client.Search(nnt.TrackName, spotify.SearchTypeTrack)
-    log.PanicIf(err)
+    iLog.Debugf(i.ctx, "Finding: [%s]", nnt)
 
-    for _, ft := range sr.Tracks.Tracks {
-        snt := i.getSpotifyNormalizedTrack(&ft)
+    var sr *spotify.SearchResult
 
-        if snt.TrackName != nnt.TrackName {
-            continue
+    for {
+        if sr == nil {
+            sr, err = i.spotifyAuth.Client.Search(nnt.TrackName, spotify.SearchTypeTrack)
+            log.PanicIf(err)
+        } else if err := i.spotifyAuth.Client.NextTrackResults(sr); err != nil {
+            iLog.Debugf(i.ctx, "(Retrieving next page of results.)")
+            log.Panic(err)
         }
 
-        if snt.AlbumName != nnt.AlbumName {
-            continue
-        }
+        trackHits := 0
+        albumHits := 0
+        choices := make([]string, len(sr.Tracks.Tracks))
+        for j, ft := range sr.Tracks.Tracks {
+            snt := i.getSpotifyNormalizedTrack(&ft)
 
-        // Look for an intersection between the artist we want and the list of 
-        // artists associated with the song.
-        //
-        // Note that Napster only produces one artist.
-        for _, an := range snt.ArtistNames {
-            if nnt.ArtistNames[0] == an {
-                return ft.ID, nil
+            choices[j] = snt.String()
+
+            // These should probably all be very similar, as this was a track-based 
+            // search.
+            if snt.TrackName != nnt.TrackName {
+                iLog.Debugf(i.ctx, "One track result does not match: [%s] != [%s]", snt.TrackName, nnt.TrackName)
+                continue
+            } else {
+                trackHits++
+                iLog.Debugf(i.ctx, "Matched track: [%s]", nnt.TrackName)
+            }
+
+            if snt.AlbumName != nnt.AlbumName {
+                iLog.Debugf(i.ctx, "One incorrect album candidate for matched track: [%s] != [%s]", snt.AlbumName, nnt.AlbumName)
+                continue
+            } else {
+                albumHits++
+                iLog.Debugf(i.ctx, "Matched album: [%s]", nnt.AlbumName)
+            }
+
+            // Look for an intersection between the artist we want and the list of 
+            // artists associated with the song.
+            //
+            // Note that Napster only produces one artist.
+            for _, an := range snt.ArtistNames {
+                napsterArtistName := nnt.ArtistNames[0]
+                if an != napsterArtistName {
+                    iLog.Debugf(i.ctx, "One incorrect artist candidate for matched track and album: [%s] != [%s]", an, napsterArtistName)
+                } else {
+                    return ft.ID, nil
+                }
             }
         }
     }
 
-    log.Panic(fmt.Errorf("track not found in Spotify: %v [%s] [%s]", nnt.ArtistNames, nnt.AlbumName, nnt.TrackName))
+    if albumHits > 0 {
+        iLog.Warningf(i.ctx, "No matching albums not found: [%s]", nnt.AlbumName)
+    } else if trackHits > 0 {
+        iLog.Warningf(i.ctx, "No matching tracks for matching albums found: [%s]", nnt.TrackName)
+    } else {
+        iLog.Warningf(i.ctx, "No matching artists for matching tracks and albums found: [%s]", nnt.ArtistNames[0])
+    }
+
+    iLog.Warningf(i.ctx, "Choices: %v", choices)
+
+    log.Panic(ErrTrackNotFoundInSpotify)
 
     // Obligatory.
     return spotify.ID(""), nil
 }
 
 func (i *Importer) getNapsterNormalizedTrack(track *napster.MetadataTrackDetail) *NormalizedTrack {
+    artistNames := []string { strings.ToLower(track.ArtistName) }
+
+    trackName := strings.ToLower(track.Name)
+    albumName := strings.ToLower(track.AlbumName)
+
     return &NormalizedTrack{
-        TrackName: track.Name,
-        AlbumName: track.AlbumName,
-        ArtistNames: []string { track.ArtistName },
+        TrackName: trackName,
+        AlbumName: albumName,
+        ArtistNames: artistNames,
     }
 }
 
-func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtists []string, collector *trackCollector) (count int, err error) {
+func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtists []string, collector *trackCollector) (count int, skipped int, missing int, err error) {
     defer func() {
         if state := recover(); state != nil {
             err = state.(error)
@@ -154,8 +208,6 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
         log.Panic(fmt.Errorf("at least one artist must be given to import"))
     }
 
-    fmt.Printf("Fetching from offset (%d).\n", i.offset)
-
     trackInfo, err := amc.GetFavoriteTracks(i.offset, i.batchSize)
     log.PanicIf(err)
 
@@ -165,8 +217,6 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
         for i, info := range trackInfo {
             ids[i] = info.Id
         }
-
-        iLog.Infof(i.ctx, "Retrieving track details.")
 
         mc := napster.NewMetadataClient(i.ctx, i.hc, i.napsterApiKey)
         tracks, err := mc.GetTrackDetail(ids...)
@@ -205,11 +255,10 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
             }
 
             if found == false {
-                for j, an := range nt.ArtistNames {
-                    if _, found := i.artistNotices[an]; found == false {
-                        iLog.Debugf(i.ctx, "One of the artists in the track that is being skipped: (%d) %v", j, an)
-                        i.artistNotices[an] = true
-                    }
+                skipped++
+
+                for _, an := range nt.ArtistNames {
+                    i.artistNotices[an] = true
                 }
 
                 continue
@@ -219,16 +268,23 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
             //
             // Note that this struct will only have exactly one artist (Napster only returns one). 
 
-            iLog.Infof(i.ctx, "Adding: [%s] [%s] [%s]\n", nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
-
             spotifyTrackId, err := i.getSpotifyTrackId(nt)
-            log.PanicIf(err)
+            if log.Is(err, ErrTrackNotFoundInSpotify) == true {
+                missing++
+                iLog.Warningf(i.ctx, "NOT FOUND IN SPOTIFY: [%s] [%s] [%s]", nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
+
+                continue
+            } else if err != nil {
+                log.PanicIf(err)
+            }
+
+            iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s]", nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
 
             collector.idList = append(collector.idList, spotifyTrackId)
         }
     }
 
-    return len(trackInfo), nil
+    return len(trackInfo), skipped, missing, nil
 }
 
 func (i *Importer) getSpotifyPlaylistId(spotifyUserId string, playlistName string) (id spotify.ID, err error) {
@@ -246,8 +302,6 @@ func (i *Importer) getSpotifyPlaylistId(spotifyUserId string, playlistName strin
     playlistName = strings.ToLower(playlistName)
     for _, p := range splp.Playlists {
         currentPlaylistName := strings.ToLower(p.Name)
-// TODO(dustin): !! Debugging.
-iLog.Debugf(i.ctx, "Checking: [%s] == [%s]", currentPlaylistName, playlistName)
 
         if currentPlaylistName == playlistName {
             return p.ID, nil
@@ -365,27 +419,61 @@ func (i *Importer) Import(spotifyPlaylistName string, onlyArtists []string) (err
     collector := new(trackCollector)
     amc := napster.NewAuthenticatedMemberClient(i.ctx, i.hc, a)
 
+    skipped := 0
+    missing := 0
+
     for {
-        count, err := i.importBatch(amc, onlyArtists, collector)
+        added, currentSkipped, currentMissing, err := i.importBatch(amc, onlyArtists, collector)
         log.PanicIf(err)
 
-        if count == 0 {
+        skipped += currentSkipped
+        missing += currentMissing
+
+        if added == 0 {
             break
         }
 
-        iLog.Debugf(i.ctx, "(%d) tracks received starting at index (%d).\n", count, i.offset)
+        iLog.Debugf(i.ctx, "(%d) tracks received starting at index (%d).", added, i.offset)
 
-        i.offset += count
+        i.offset += added
     }
 
-    iLog.Infof(i.ctx, "Adding (%d) tracks to the playlist.", len(collector.idList))
+    if len(i.artistNotices) > 0 {
+        ignoredArtists := make([]string, len(i.artistNotices))
 
-    iLog.Infof(i.ctx, "SKIPPING ADD")
-    spotifyUserId = spotifyUserId
-    spotifyPlaylistId = spotifyPlaylistId
+        j := 0
+        for an, _ := range i.artistNotices {
+            ignoredArtists[j] = an
+            j++
+        }
+
+        ans := sort.StringSlice(ignoredArtists)
+        ans.Sort()
+
+        for _, an := range ans {
+            iLog.Warningf(i.ctx, "IGNORING ARTIST: [%s]", an)
+        }
+    }
+
+    len_ := len(collector.idList)
+
+    iLog.Infof(i.ctx, "(%d) tracks found to import.", len_)
+    iLog.Infof(i.ctx, "(%d) tracks skipped.", skipped)
+    iLog.Infof(i.ctx, "(%d) tracks missing.", missing)
+
+    if len_ == 0 {
+        iLog.Warningf(i.ctx, "No tracks found to import.")
+    } else {
+        iLog.Infof(i.ctx, "Adding tracks to the playlist.")
+
+        iLog.Infof(i.ctx, "SKIPPING ADD")
+        spotifyUserId = spotifyUserId
+        spotifyPlaylistId = spotifyPlaylistId
 /*
-    _, err := i.spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, collector.idList...)
-    log.PanicIf(err)
+        _, err := i.spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, collector.idList...)
+        log.PanicIf(err)
 */
+    }
+
     return nil
 }

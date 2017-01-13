@@ -57,12 +57,15 @@ func main() {
     cla := log.NewConsoleLogAdapter()
     log.AddAdapter("console", cla)
 
+    log.AddExcludeFilter("napster.client")
+    log.AddExcludeFilter("napster.authorization")
+
     o := readOptions()
     ctx := context.Background()
     authC := make(chan *gnsssync.SpotifyContext)
 
     go func() {
-        sa := gnsssync.NewSpotifyAuthorizer(SpotifyApiClientId, SpotifyApiSecretKey, SpotifyRedirectUrl, SpotifyAuthorizeLocalBindUrl, authC)
+        sa := gnsssync.NewSpotifyAuthorizer(ctx, SpotifyApiClientId, SpotifyApiSecretKey, SpotifyRedirectUrl, SpotifyAuthorizeLocalBindUrl, authC)
         if err := sa.Authorize(); err != nil {
             log.Panic(err)
         }
