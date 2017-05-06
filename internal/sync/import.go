@@ -118,6 +118,9 @@ func (i *Importer) getSpotifyTrackId(nnt *NormalizedTrack) (id spotify.ID, err e
 
     var sr *spotify.SearchResult
 
+    trackHits := 0
+    albumHits := 0
+
     for {
         if sr == nil {
             sr, err = i.spotifyAuth.Client.Search(nnt.TrackName, spotify.SearchTypeTrack)
@@ -127,8 +130,6 @@ func (i *Importer) getSpotifyTrackId(nnt *NormalizedTrack) (id spotify.ID, err e
             log.Panic(err)
         }
 
-        trackHits := 0
-        albumHits := 0
         choices := make([]string, len(sr.Tracks.Tracks))
         for j, ft := range sr.Tracks.Tracks {
             snt := i.getSpotifyNormalizedTrack(&ft)
@@ -166,6 +167,8 @@ func (i *Importer) getSpotifyTrackId(nnt *NormalizedTrack) (id spotify.ID, err e
                 }
             }
         }
+
+        iLog.Warningf(i.ctx, "Choices: %v", choices)
     }
 
     if albumHits > 0 {
@@ -175,8 +178,6 @@ func (i *Importer) getSpotifyTrackId(nnt *NormalizedTrack) (id spotify.ID, err e
     } else {
         iLog.Warningf(i.ctx, "No matching artists for matching tracks and albums found: [%s]", nnt.ArtistNames[0])
     }
-
-    iLog.Warningf(i.ctx, "Choices: %v", choices)
 
     log.Panic(ErrTrackNotFoundInSpotify)
 

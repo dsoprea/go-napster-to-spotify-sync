@@ -1,9 +1,6 @@
 package main
 
 import (
-    "fmt"
-    "os"
-
     "golang.org/x/net/context"
     "github.com/dsoprea/go-logging"
     "github.com/jessevdk/go-flags"
@@ -18,14 +15,6 @@ const (
 
 // Config
 var (
-    SpotifyApiClientId = os.Getenv("SPOTIFY_CLIENT_ID")
-    SpotifyApiSecretKey = os.Getenv("SPOTIFY_SECRET_KEY")
-
-    NapsterApiKey = os.Getenv("NAPSTER_API_KEY")
-    NapsterSecretKey = os.Getenv("NAPSTER_SECRET_KEY")
-    NapsterUsername = os.Getenv("NAPSTER_USERNAME")
-    NapsterPassword = os.Getenv("NAPSTER_PASSWORD")
-
     ImportBatchSize = 100
 )
 
@@ -34,8 +23,16 @@ var (
     mLog = log.NewLogger("main")
 )
 
-
 type options struct {
+    SpotifyApiClientId string `short:"saci" long:"spotify-api-client-id" required:"true" description:"Spotify API client-ID"`
+    SpotifyApiSecretKey string `short:"sask" long:"spotify-api-secret-key" required:"true" description:"Spotify API secret key"`
+
+    NapsterApiKey string `short:"nak" long:"napster-api-key" required:"true" description:"Napster API key"`
+    NapsterSecretKey string `short:"nsk" long:"napster-secret-key" required:"true" description:"Napster secret key"`
+
+    NapsterUsername string `short:"nu" long:"napster-username" required:"true" description:"Napster username"`
+    NapsterPassword string `short:"np" long:"napster-password" required:"true" description:"Napster password"`
+
     SpotifyPlaylistName string  `short:"p" long:"playlist-name" description:"Spotify playlist name" required:"true"`
     OnlyArtists []string        `short:"a" long:"only-artists" description:"One artist to import" required:"true"`
 }
@@ -65,7 +62,7 @@ func main() {
     authC := make(chan *gnsssync.SpotifyContext)
 
     go func() {
-        sa := gnsssync.NewSpotifyAuthorizer(ctx, SpotifyApiClientId, SpotifyApiSecretKey, SpotifyRedirectUrl, SpotifyAuthorizeLocalBindUrl, authC)
+        sa := gnsssync.NewSpotifyAuthorizer(ctx, o.SpotifyApiClientId, o.SpotifyApiSecretKey, SpotifyRedirectUrl, SpotifyAuthorizeLocalBindUrl, authC)
         if err := sa.Authorize(); err != nil {
             log.Panic(err)
         }
@@ -81,7 +78,7 @@ func main() {
 
         mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
 
-        i := gnsssync.NewImporter(ctx, NapsterApiKey, NapsterSecretKey, NapsterUsername, NapsterPassword, spotifyAuth, SpotifyApiSecretKey, ImportBatchSize)
+        i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, o.SpotifyApiSecretKey, ImportBatchSize)
         if err := i.Import(o.SpotifyPlaylistName, o.OnlyArtists); err != nil {
             log.Panic(err)
         }
@@ -90,14 +87,4 @@ func main() {
     }()
 
     <-doneC
-}
-
-func init() {
-    if SpotifyApiClientId == "" {
-        log.Panic(fmt.Errorf("Spotify client-ID is empty"))
-    }
-    
-    if SpotifyApiSecretKey == "" {
-        log.Panic(fmt.Errorf("Spotify secret-key is empty"))
-    }
 }
