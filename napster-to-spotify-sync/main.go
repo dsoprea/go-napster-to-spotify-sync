@@ -2,6 +2,7 @@ package main
 
 import (
     "os"
+    "fmt"
 
     "golang.org/x/net/context"
     "github.com/dsoprea/go-logging"
@@ -35,8 +36,10 @@ type options struct {
     NapsterUsername string `long:"napster-username" required:"true" description:"Napster username"`
     NapsterPassword string `long:"napster-password" required:"true" description:"Napster password"`
 
-    SpotifyPlaylistName string  `short:"p" long:"playlist-name" description:"Spotify playlist name" required:"true"`
-    OnlyArtists []string        `short:"a" long:"only-artists" description:"One artist to import" required:"true"`
+    SpotifyPlaylistName string  `short:"p" long:"playlist-name" required:"true" description:"Spotify playlist name"`
+    OnlyArtists []string        `short:"a" long:"only-artists" required:"true" description:"One artist to import"`
+
+    NoChanges bool `short:"n" long:"no-changes" description:"Do not make changes to Spotify"`
 }
 
 func main() {
@@ -51,6 +54,7 @@ func main() {
 
     o := new(options)
     if _, err := flags.Parse(o); err != nil {
+        fmt.Println(err)
         os.Exit(1)
     }
 
@@ -67,20 +71,34 @@ func main() {
         // terminate at the end as would be desired.
     }()
 
-    doneC := make(chan bool)
+    spotifyAuth := <-authC
 
-    go func() {
-        spotifyAuth := <-authC
+    mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
 
-        mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
+    sc := gnsssync.NewSpotifyCache(ctx, spotifyAuth)
+    i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, sc, ImportBatchSize)
 
-        i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, o.SpotifyApiSecretKey, ImportBatchSize)
-        if err := i.Import(o.SpotifyPlaylistName, o.OnlyArtists); err != nil {
+    idList, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists)
+    log.PanicIf(err)
+
+    len_ := len(idList)
+    if len_ == 0 {
+        mLog.Warningf(ctx, "No tracks found to import.")
+    } else if o.NoChanges == true {
+        mLog.Warningf(ctx, "There were changes to make but we were told to not make them.")
+    } else {
+        mLog.Infof(ctx, "Adding tracks to the playlist.")
+
+        spotifyUserId, err := sc.GetSpotifyCurrentUserId()
+        log.PanicIf(err)
+
+        spotifyPlaylistId, err := sc.GetSpotifyPlaylistId(spotifyUserId, o.SpotifyPlaylistName)
+        log.PanicIf(err)
+
+        mLog.Infof(ctx, "Adding (%d) tracks.", len_)
+
+        if _, err := spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, idList...); err != nil {
             log.Panic(err)
         }
-
-        doneC <- true
-    }()
-
-    <-doneC
+    }
 }

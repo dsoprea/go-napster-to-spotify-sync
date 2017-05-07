@@ -108,9 +108,17 @@ func (sa *SpotifyAuthorizer) Authorize() (err error) {
         }
     }()
 
+    scopes := []string {
+        spotify.ScopeUserReadPrivate,
+        spotify.ScopePlaylistReadCollaborative,
+        spotify.ScopePlaylistReadPrivate,
+        spotify.ScopePlaylistModifyPrivate,
+        spotify.ScopePlaylistModifyPublic,
+    }
+
     // the redirect URL must be an exact match of a URL you've registered for your application
     // scopes determine which permissions the user is prompted to authorize
-    sa.auth = spotify.NewAuthenticator(sa.apiRedirectUrl, spotify.ScopeUserReadPrivate)
+    sa.auth = spotify.NewAuthenticator(sa.apiRedirectUrl, scopes...)
 
     // if you didn't store your ID and secret key in the specified environment variables,
     // you can set them manually here
