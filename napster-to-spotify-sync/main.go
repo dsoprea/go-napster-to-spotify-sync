@@ -1,6 +1,8 @@
 package main
 
 import (
+    "os"
+
     "golang.org/x/net/context"
     "github.com/dsoprea/go-logging"
     "github.com/jessevdk/go-flags"
@@ -24,27 +26,17 @@ var (
 )
 
 type options struct {
-    SpotifyApiClientId string `short:"saci" long:"spotify-api-client-id" required:"true" description:"Spotify API client-ID"`
-    SpotifyApiSecretKey string `short:"sask" long:"spotify-api-secret-key" required:"true" description:"Spotify API secret key"`
+    SpotifyApiClientId string `long:"spotify-api-client-id" required:"true" description:"Spotify API client-ID"`
+    SpotifyApiSecretKey string `long:"spotify-api-secret-key" required:"true" description:"Spotify API secret key"`
 
-    NapsterApiKey string `short:"nak" long:"napster-api-key" required:"true" description:"Napster API key"`
-    NapsterSecretKey string `short:"nsk" long:"napster-secret-key" required:"true" description:"Napster secret key"`
+    NapsterApiKey string `long:"napster-api-key" required:"true" description:"Napster API key"`
+    NapsterSecretKey string `long:"napster-secret-key" required:"true" description:"Napster secret key"`
 
-    NapsterUsername string `short:"nu" long:"napster-username" required:"true" description:"Napster username"`
-    NapsterPassword string `short:"np" long:"napster-password" required:"true" description:"Napster password"`
+    NapsterUsername string `long:"napster-username" required:"true" description:"Napster username"`
+    NapsterPassword string `long:"napster-password" required:"true" description:"Napster password"`
 
     SpotifyPlaylistName string  `short:"p" long:"playlist-name" description:"Spotify playlist name" required:"true"`
     OnlyArtists []string        `short:"a" long:"only-artists" description:"One artist to import" required:"true"`
-}
-
-func readOptions() *options {
-    o := new(options)
-
-    if _, err := flags.Parse(o); err != nil {
-        log.Panic(err)
-    }
-
-    return o
 }
 
 func main() {
@@ -57,7 +49,11 @@ func main() {
     log.AddExcludeFilter("napster.client")
     log.AddExcludeFilter("napster.authorization")
 
-    o := readOptions()
+    o := new(options)
+    if _, err := flags.Parse(o); err != nil {
+        os.Exit(1)
+    }
+
     ctx := context.Background()
     authC := make(chan *gnsssync.SpotifyContext)
 

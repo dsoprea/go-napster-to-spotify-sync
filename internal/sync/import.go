@@ -123,9 +123,12 @@ func (i *Importer) getSpotifyTrackId(nnt *NormalizedTrack) (id spotify.ID, err e
 
     for {
         if sr == nil {
+            iLog.Debugf(i.ctx, "Searching for track: [%s]", nnt.TrackName)
             sr, err = i.spotifyAuth.Client.Search(nnt.TrackName, spotify.SearchTypeTrack)
             log.PanicIf(err)
-        } else if err := i.spotifyAuth.Client.NextTrackResults(sr); err != nil {
+        } else if err := i.spotifyAuth.Client.NextTrackResults(sr); err == spotify.ErrNoMorePages {
+            break
+        } else if err != nil {
             iLog.Debugf(i.ctx, "(Retrieving next page of results.)")
             log.Panic(err)
         }
@@ -470,10 +473,9 @@ func (i *Importer) Import(spotifyPlaylistName string, onlyArtists []string) (err
         iLog.Infof(i.ctx, "SKIPPING ADD")
         spotifyUserId = spotifyUserId
         spotifyPlaylistId = spotifyPlaylistId
-/*
+
         _, err := i.spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, collector.idList...)
         log.PanicIf(err)
-*/
     }
 
     return nil
