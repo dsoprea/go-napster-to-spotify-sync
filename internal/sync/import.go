@@ -19,12 +19,14 @@ import (
 // Errors
 var (
     ErrTrackNotFoundInSpotify = fmt.Errorf("track not found in Spotify")
+    ErrAlbumNotFoundInSpotify = fmt.Errorf("album not found in Spotify")
+    ErrArtistNotFoundInSpotify = fmt.Errorf("artist not found in Spotify")
 )
 
 // Misc
 var (
     iLog = log.NewLogger("gnss.import")
-    invalidTrackChars = regexp.Compile("[^a-zA-Z0-9' ]+")
+    invalidTrackChars *regexp.Regexp
 )
 
 
@@ -181,92 +183,114 @@ func (i *Importer) getSpotifyNormalizedTrack(ft *spotify.FullTrack) *NormalizedT
     }
 }
 
-// getSpotifyTrackId Find and add the track to the Spotify playlist.
-func (i *Importer) getSpotifyTrackId(nnt *NormalizedTrack) (id spotify.ID, err error) {
+func (i *Importer) getSpotifyArtistId(name string) (id spotify.ID, err error) {
     defer func() {
         if state := recover(); state != nil {
             err = state.(error)
         }
     }()
 
-    iLog.Debugf(i.ctx, "Finding: [%s]", nnt)
+    name = strings.ToLower(name)
+
+// TODO(dustin): !! Add caching.
 
     var sr *spotify.SearchResult
 
-    trackHits := 0
-    albumHits := 0
-
     for {
         if sr == nil {
-            iLog.Debugf(i.ctx, "Searching for track: [%s]", nnt.TrackName)
-// TODO(dustin): !! We should search by album and check against the returned list. We can cache this for subsequent tracks and we definitely won't have to deal with matching against other artists.
-            sr, err = i.spotifyAuth.Client.Search(nnt.TrackName, spotify.SearchTypeTrack)
+            iLog.Debugf(i.ctx, "Searching for artist: [%s]", name)
+            sr, err = i.spotifyAuth.Client.Search(name, spotify.SearchTypeArtist)
             log.PanicIf(err)
-        } else if err := i.spotifyAuth.Client.NextTrackResults(sr); err == spotify.ErrNoMorePages {
+        } else if err := i.spotifyAuth.Client.NextArtistResults(sr); err == spotify.ErrNoMorePages {
             break
         } else if err != nil {
             iLog.Debugf(i.ctx, "(Retrieving next page of results.)")
             log.Panic(err)
         }
 
-        choices := make([]string, len(sr.Tracks.Tracks))
-        for j, ft := range sr.Tracks.Tracks {
-            snt := i.getSpotifyNormalizedTrack(&ft)
+        for _, a := range sr.Artists.Artists {
+            an := strings.ToLower(a.Name)
 
-            choices[j] = snt.String()
-
-            // We've seen differences in how remixes and other titles are 
-            // expressed (e.g. hyphens vs parentheses).
-            spotifyTrackName = invalidTrackChars.ReplaceAllString(snt.TrackName, "")
-            napsterTrackName = invalidTrackChars.ReplaceAllString(nnt.TrackName, "")
-
-            // These should probably all be very similar, as this was a track-based 
-            // search.
-            if spotifyTrackName != napsterTrackName {
-                iLog.Debugf(i.ctx, "One track result does not match: [%s] != [%s]", spotifyTrackName, napsterTrackName)
-                continue
-            } else {
-                trackHits++
-                iLog.Debugf(i.ctx, "Matched track: [%s]", nnt.TrackName)
-            }
-
-            if snt.AlbumName != nnt.AlbumName {
-                iLog.Debugf(i.ctx, "One incorrect album candidate for matched track: [%s] != [%s]", snt.AlbumName, nnt.AlbumName)
-                continue
-            } else {
-                albumHits++
-                iLog.Debugf(i.ctx, "Matched album: [%s]", nnt.AlbumName)
-            }
-
-            // Look for an intersection between the artist we want and the list of 
-            // artists associated with the song.
-            //
-            // Note that Napster only produces one artist.
-            for _, an := range snt.ArtistNames {
-                napsterArtistName := nnt.ArtistNames[0]
-                if an != napsterArtistName {
-                    iLog.Debugf(i.ctx, "One incorrect artist candidate for matched track and album: [%s] != [%s]", an, napsterArtistName)
-                } else {
-                    return ft.ID, nil
-                }
+            if an == name {
+                return a.ID, nil
             }
         }
-
-        iLog.Warningf(i.ctx, "Choices: %v", choices)
     }
 
-    if albumHits > 0 {
-        iLog.Warningf(i.ctx, "No matching albums not found: [%s]", nnt.AlbumName)
-    } else if trackHits > 0 {
-        iLog.Warningf(i.ctx, "No matching tracks for matching albums found: [%s]", nnt.TrackName)
-    } else {
-        iLog.Warningf(i.ctx, "No matching artists for matching tracks and albums found: [%s]", nnt.ArtistNames[0])
+    log.Panic(ErrArtistNotFoundInSpotify)
+    return spotify.ID(""), nil
+}
+
+func (i *Importer) getSpotifyAlbumId(artistId spotify.ID, name string) (id spotify.ID, err error) {
+    defer func() {
+        if state := recover(); state != nil {
+            err = state.(error)
+        }
+    }()
+
+    name = strings.ToLower(name)
+
+// TODO(dustin): !! Add caching.
+
+    sp, err := spotify.GetArtistAlbums(artistId)
+    log.PanicIf(err)
+
+    for _, sa := range sp.Albums {
+        if sa.Name == name {
+            return sa.ID, nil
+        }
+    }
+
+    log.Panic(ErrAlbumNotFoundInSpotify)
+    return spotify.ID(""), nil
+}
+
+// getSpotifyTrackId Find and add the track to the Spotify playlist.
+func (i *Importer) getSpotifyTrackId(albumId spotify.ID, name string) (id spotify.ID, err error) {
+    defer func() {
+        if state := recover(); state != nil {
+            err = state.(error)
+        }
+    }()
+
+// TODO(dustin): !! Add caching.
+
+    stp, err := spotify.GetAlbumTracks(id)
+    log.PanicIf(err)
+
+    name = invalidTrackChars.ReplaceAllString(name, "")
+
+    for _, track := range stp.Tracks {
+        spotifyTrackName := invalidTrackChars.ReplaceAllString(track.Name, "")
+
+        if spotifyTrackName == name {
+            return track.ID, nil
+        }
     }
 
     log.Panic(ErrTrackNotFoundInSpotify)
-
-    // Obligatory.
     return spotify.ID(""), nil
+}
+
+func (i *Importer) getSpotifyTrackIdWithNames(artistName string, albumName string, trackName string) (spotifyTrackId spotify.ID, err error) {
+    defer func() {
+        if state := recover(); state != nil {
+            err = state.(error)
+        }
+    }()
+
+// TODO(dustin): !! We might just consolidate all of the caching here.
+
+    artistId, err := i.getSpotifyArtistId(artistName)
+    log.PanicIf(err)
+
+    albumId, err := i.getSpotifyAlbumId(artistId, albumName)
+    log.PanicIf(err)
+
+    trackId, err := i.getSpotifyTrackId(albumId, trackName)
+    log.PanicIf(err)
+
+    return trackId, nil
 }
 
 func (i *Importer) getNapsterNormalizedTrack(track *napster.MetadataTrackDetail) *NormalizedTrack {
@@ -353,7 +377,7 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
             //
             // Note that this struct will only have exactly one artist (Napster only returns one). 
 
-            spotifyTrackId, err := i.getSpotifyTrackId(nt)
+            spotifyTrackId, err := i.getSpotifyTrackIdWithNames(nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
             if log.Is(err, ErrTrackNotFoundInSpotify) == true {
                 missingPhrase := fmt.Sprintf("[%s] [%s] [%s]", nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
 
@@ -512,4 +536,10 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
     }
 
     return collector.idList, nil
+}
+
+func init() {
+    var err error
+    invalidTrackChars, err = regexp.Compile("[^a-zA-Z0-9' ]+")
+    log.PanicIf(err)
 }
