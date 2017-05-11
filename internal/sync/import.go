@@ -23,11 +23,25 @@ var (
     ErrArtistNotFoundInSpotify = fmt.Errorf("artist not found in Spotify")
 )
 
+// Cache
+var (
+    cachedArtists = make(map[string]spotify.ID)
+    cachedAlbums = make(map[cachedAlbumKey]spotify.ID)
+    cachedTracks = make(map[spotify.ID]map[string]spotify.ID)
+)
+
 // Misc
 var (
     iLog = log.NewLogger("gnss.import")
     invalidTrackChars *regexp.Regexp
+    allowCache = true
 )
+
+
+type cachedAlbumKey struct {
+    artistId spotify.ID
+    albumName string
+}
 
 
 type SpotifyCache struct {
@@ -192,7 +206,11 @@ func (i *Importer) getSpotifyArtistId(name string) (id spotify.ID, err error) {
 
     name = strings.ToLower(name)
 
-// TODO(dustin): !! Add caching.
+    if allowCache {
+        if id, found := cachedArtists[name]; found == true {
+            return id, nil
+        }
+    }
 
     var sr *spotify.SearchResult
 
@@ -212,6 +230,10 @@ func (i *Importer) getSpotifyArtistId(name string) (id spotify.ID, err error) {
             an := strings.ToLower(a.Name)
 
             if an == name {
+                if allowCache {
+                    cachedArtists[name] = a.ID
+                }
+
                 return a.ID, nil
             }
         }
@@ -230,13 +252,26 @@ func (i *Importer) getSpotifyAlbumId(artistId spotify.ID, name string) (id spoti
 
     name = strings.ToLower(name)
 
-// TODO(dustin): !! Add caching.
+    cak := cachedAlbumKey{
+        artistId: artistId,
+        albumName: name,
+    }
+
+    if allowCache {
+        if id, found := cachedAlbums[cak]; found == true {
+            return id, nil
+        }
+    }
 
     sp, err := spotify.GetArtistAlbums(artistId)
     log.PanicIf(err)
 
     for _, sa := range sp.Albums {
         if sa.Name == name {
+            if allowCache {
+                cachedAlbums[cak] = sa.ID
+            }
+
             return sa.ID, nil
         }
     }
@@ -253,18 +288,25 @@ func (i *Importer) getSpotifyTrackId(albumId spotify.ID, name string) (id spotif
         }
     }()
 
-// TODO(dustin): !! Add caching.
-
-    stp, err := spotify.GetAlbumTracks(id)
-    log.PanicIf(err)
-
     name = invalidTrackChars.ReplaceAllString(name, "")
 
-    for _, track := range stp.Tracks {
-        spotifyTrackName := invalidTrackChars.ReplaceAllString(track.Name, "")
+    tracks, found := cachedTracks[albumId]
+    if found == false {
+        stp, err := spotify.GetAlbumTracks(id)
+        log.PanicIf(err)
 
-        if spotifyTrackName == name {
-            return track.ID, nil
+        tracks = make(map[string]spotify.ID)
+        for _, track := range stp.Tracks {
+            spotifyTrackName := invalidTrackChars.ReplaceAllString(track.Name, "")
+            tracks[spotifyTrackName] = track.ID
+        }
+
+        cachedTracks[albumId] = tracks
+    }
+
+    for albumTrackName, id := range tracks {
+        if albumTrackName == name {
+            return id, nil
         }
     }
 
