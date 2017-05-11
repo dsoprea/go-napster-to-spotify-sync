@@ -13,15 +13,15 @@ import (
 
 // Errors
 var (
-    ErrTrackNotFoundInSpotify = fmt.Errorf("track not found in Spotify")
-    ErrAlbumNotFoundInSpotify = fmt.Errorf("album not found in Spotify")
-    ErrArtistNotFoundInSpotify = fmt.Errorf("artist not found in Spotify")
+    ErrSpotifyArtistNotFound = fmt.Errorf("artist not found in Spotify")
+    ErrSpotifyAlbumNotFound = fmt.Errorf("album not found in Spotify")
+    ErrSpotifyTrackNotFound = fmt.Errorf("track not found in Spotify")
 )
 
 // Cache
 var (
     cachedArtists = make(map[string]spotify.ID)
-    cachedAlbums = make(map[cachedAlbumKey]spotify.ID)
+    cachedAlbums = make(map[albumKey]spotify.ID)
     cachedTracks = make(map[spotify.ID]map[string]spotify.ID)
 )
 
@@ -30,10 +30,11 @@ var (
     sLog = log.NewLogger("gnss.spotify")
     invalidTrackChars *regexp.Regexp
     allowCache = true
+    printCandidates = true
 )
 
 
-type cachedAlbumKey struct {
+type albumKey struct {
     artistId spotify.ID
     albumName string
 }
@@ -148,8 +149,6 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
         }
     }()
 
-    name = strings.ToLower(name)
-
     if allowCache {
         if id, found := cachedArtists[name]; found == true {
             return id, nil
@@ -157,6 +156,7 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
     }
 
     var sr *spotify.SearchResult
+    var lastFound spotify.ID
 
     for {
         if sr == nil {
@@ -170,20 +170,27 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
             log.Panic(err)
         }
 
-        for _, a := range sr.Artists.Artists {
+        for i, a := range sr.Artists.Artists {
             an := strings.ToLower(a.Name)
 
             if an == name {
+// TODO(dustin): !! We're currently scanning the entire list of matching artists just to get a feel for how many matching artists there are. This might explain why we don't find all of the albums under the first match. UPDATE: Doesn't appear to be a problem.
+                sLog.Debugf(sa.ctx, "Found ID for artist [%s]: (%d) [%s]", name, i, a.ID)
+
                 if allowCache {
                     cachedArtists[name] = a.ID
                 }
 
-                return a.ID, nil
+                lastFound = a.ID
             }
         }
     }
 
-    log.Panic(ErrArtistNotFoundInSpotify)
+    if lastFound != spotify.ID("") {
+        return lastFound, nil
+    }
+
+    log.Panic(ErrSpotifyArtistNotFound)
     return spotify.ID(""), nil
 }
 
@@ -194,9 +201,7 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string) (i
         }
     }()
 
-    name = strings.ToLower(name)
-
-    cak := cachedAlbumKey{
+    cak := albumKey{
         artistId: artistId,
         albumName: name,
     }
@@ -207,11 +212,23 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string) (i
         }
     }
 
+// TODO(dustin): !! This isn't returning all albums (e.g. 3 Doors Down's "Away From the Sun").
+// TODO(dustin): Reimplement using GetArtistAlbumsOpt() so that we can pass the type.
     sp, err := spotify.GetArtistAlbums(artistId)
     log.PanicIf(err)
 
-    for _, a := range sp.Albums {
-        if a.Name == name {
+    distilledAvailable := make([]string, len(sp.Albums))
+    for i, a := range sp.Albums {
+        if a.AlbumType != "album" {
+            continue
+        }
+
+        thisName := strings.ToLower(a.Name)
+        distilledAvailable[i] = thisName
+
+        if thisName == name {
+            sLog.Debugf(sa.ctx, "Found ID for album [%s] under artist-ID [%s]: [%s]", name, artistId, name)
+
             if allowCache {
                 cachedAlbums[cak] = a.ID
             }
@@ -220,7 +237,15 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string) (i
         }
     }
 
-    log.Panic(ErrAlbumNotFoundInSpotify)
+    sLog.Debugf(sa.ctx, "Album [%s] under artist-ID [%s] not found.", name, artistId)
+
+    if printCandidates {
+        for i, thisName := range distilledAvailable {
+            sLog.Debugf(sa.ctx, "Available album under artist-ID [%s]: (%d) [%s]", artistId, i, thisName)
+        }
+    }
+
+    log.Panic(ErrSpotifyAlbumNotFound)
     return spotify.ID(""), nil
 }
 
@@ -242,12 +267,14 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string) (id
     }
 
     if found == false {
-        stp, err := spotify.GetAlbumTracks(id)
+        stp, err := spotify.GetAlbumTracks(albumId)
         log.PanicIf(err)
 
         tracks = make(map[string]spotify.ID)
         for _, track := range stp.Tracks {
             spotifyTrackName := invalidTrackChars.ReplaceAllString(track.Name, "")
+            spotifyTrackName = strings.ToLower(spotifyTrackName)
+
             tracks[spotifyTrackName] = track.ID
         }
 
@@ -262,7 +289,20 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string) (id
         }
     }
 
-    log.Panic(ErrTrackNotFoundInSpotify)
+    sLog.Debugf(sa.ctx, "Track [%s] under album-ID [%s] not found.", name, albumId)
+
+    if printCandidates {
+        sLog.Debugf(sa.ctx, "(%d) tracks are available in album-ID [%s].", len(tracks), albumId)
+
+        i := 0
+        for thisName, _ := range tracks {
+            sLog.Debugf(sa.ctx, "Available track under album-ID [%s]: (%d) [%s]", albumId, i, thisName)
+        
+            i++
+        }
+    }
+
+    log.Panic(ErrSpotifyTrackNotFound)
     return spotify.ID(""), nil
 }
 

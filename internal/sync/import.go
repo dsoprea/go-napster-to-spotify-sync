@@ -21,6 +21,12 @@ var (
 )
 
 
+type albumKeyNames struct {
+    artistName string
+    albumName string
+}
+
+
 type Importer struct {
     ctx context.Context
     hc *http.Client
@@ -126,6 +132,9 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
         tracks, err := mc.GetTrackDetail(ids...)
         log.PanicIf(err)
 
+        missingArtists := make(map[string]bool)
+        missingAlbums := make(map[albumKeyNames]bool)
+
         for _, track := range tracks {
             nt := i.getNapsterNormalizedTrack(&track)
 
@@ -172,19 +181,61 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
             //
             // Note that this struct will only have exactly one artist (Napster only returns one). 
 
-            spotifyTrackId, err := i.sa.GetSpotifyTrackIdWithNames(nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
-            if log.Is(err, ErrTrackNotFoundInSpotify) == true {
-                missingPhrase := fmt.Sprintf("[%s] [%s] [%s]", nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
+            artistName := strings.ToLower(nt.ArtistNames[0])
+            albumName := strings.ToLower(nt.AlbumName)
 
-                missing = append(missing, missingPhrase)
-                iLog.Warningf(i.ctx, "NOT FOUND IN SPOTIFY: %s", missingPhrase)
+            artistPhrase := fmt.Sprintf("[%s]", artistName)
+            albumPhrase := fmt.Sprintf("[%s] [%s]", artistName, albumName)
+            trackPhrase := fmt.Sprintf("[%s] [%s] [%s]", artistName, albumName, nt.TrackName)
+
+            akn := albumKeyNames{
+                artistName: artistName,
+                albumName: albumName,
+            }
+
+            // Short circuit if we've previously missed on this artist or album.
+
+            if _, found := missingArtists[artistName]; found == true {
+                continue
+            }
+
+            if _, found := missingAlbums[akn]; found == true {
+                continue
+            }
+
+            // Do the lookup.
+
+            spotifyTrackId, err := i.sa.GetSpotifyTrackIdWithNames(artistName, albumName, nt.TrackName)
+            if log.Is(err, ErrSpotifyArtistNotFound) == true {
+                if _, found := missingArtists[artistName]; found == false {
+                    missing = append(missing, artistPhrase)
+                    missingArtists[artistName] = true
+
+                    iLog.Warningf(i.ctx, "ARTIST NOT FOUND IN SPOTIFY: %s", artistPhrase)
+                }
+
+                continue
+            } else if log.Is(err, ErrSpotifyAlbumNotFound) == true {
+                if _, found := missingAlbums[akn]; found == false {
+// TODO(dustin): !! This is still printing things twice.
+                    missing = append(missing, albumPhrase)
+                    missingAlbums[akn] = true
+
+                    iLog.Warningf(i.ctx, "ALBUM NOT FOUND IN SPOTIFY: %s", albumPhrase)
+                }
+
+                continue
+            } else if log.Is(err, ErrSpotifyTrackNotFound) == true {
+                missing = append(missing, trackPhrase)
+
+                iLog.Warningf(i.ctx, "TRACK NOT FOUND IN SPOTIFY: %s", trackPhrase)
 
                 continue
             } else if err != nil {
                 log.PanicIf(err)
             }
 
-            iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s]", nt.ArtistNames[0], nt.AlbumName, nt.TrackName)
+            iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s]", artistName, albumName, nt.TrackName)
 
             collector.idList = append(collector.idList, spotifyTrackId)
         }
@@ -303,10 +354,9 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
 
     iLog.Infof(i.ctx, "(%d) tracks found to import.", len_)
     iLog.Infof(i.ctx, "(%d) tracks skipped.", skipped)
-    iLog.Infof(i.ctx, "(%d) tracks missing.", len(missing))
 
     for j, missingPhrase := range missing {
-        iLog.Infof(i.ctx, "TRACK NOT FOUND: (%d) %s", j, missingPhrase)
+        iLog.Infof(i.ctx, "NOT FOUND: (%d) %s", j, missingPhrase)
     }
 
     return collector.idList, nil
