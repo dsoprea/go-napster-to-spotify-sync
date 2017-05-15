@@ -45,9 +45,13 @@ type Importer struct {
 
     spotifyIndex map[string]bool
     artistNotices map[string]bool
+
+    marketName string
 }
 
-func NewImporter(ctx context.Context, napsterApiKey, napsterSecretKey, napsterUsername, napsterPassword string, spotifyAuth *SpotifyContext, spotifyCache *SpotifyCache, batchSize int) *Importer {
+// NewImporter creates an Importer instance. `marketName` can be the name of a 
+// market to filter albums by or empty.
+func NewImporter(ctx context.Context, napsterApiKey, napsterSecretKey, napsterUsername, napsterPassword string, spotifyAuth *SpotifyContext, spotifyCache *SpotifyCache, batchSize int, marketName string) *Importer {
     hc := new(http.Client)
 
     spotifyIndex := make(map[string]bool)
@@ -73,6 +77,8 @@ func NewImporter(ctx context.Context, napsterApiKey, napsterSecretKey, napsterUs
 
         spotifyIndex: spotifyIndex,
         artistNotices: artistNotices,
+
+        marketName: marketName,
     }
 }
 
@@ -205,7 +211,7 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
 
             // Do the lookup.
 
-            spotifyTrackId, err := i.sa.GetSpotifyTrackIdWithNames(artistName, albumName, nt.TrackName)
+            spotifyTrackId, err := i.sa.GetSpotifyTrackIdWithNames(artistName, albumName, nt.TrackName, i.marketName)
             if log.Is(err, ErrSpotifyArtistNotFound) == true {
                 if _, found := missingArtists[artistName]; found == false {
                     missing = append(missing, artistPhrase)

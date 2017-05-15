@@ -40,6 +40,8 @@ type options struct {
     OnlyArtists []string        `short:"a" long:"only-artists" required:"true" description:"One artist to import"`
 
     NoChanges bool `short:"n" long:"no-changes" description:"Do not make changes to Spotify"`
+
+    SpotifyAlbumMarket string `short:"m" long:"spotify-album-market" description:"Name of music market (two-letter country code) to filter Spotify albums by"`
 }
 
 func main() {
@@ -76,7 +78,7 @@ func main() {
     mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
 
     sc := gnsssync.NewSpotifyCache(ctx, spotifyAuth)
-    i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, sc, ImportBatchSize)
+    i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, sc, ImportBatchSize, o.SpotifyAlbumMarket)
 
     idList, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists)
     log.PanicIf(err)

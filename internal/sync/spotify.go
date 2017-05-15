@@ -11,6 +11,12 @@ import (
     "github.com/zmb3/spotify"
 )
 
+// Config
+const (
+// TODO(dustin): !! Debugging.
+    SpotifyAlbumReadBatchSize = 5
+)
+
 // Errors
 var (
     ErrSpotifyArtistNotFound = fmt.Errorf("artist not found in Spotify")
@@ -194,50 +200,103 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
     return spotify.ID(""), nil
 }
 
-func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string) (id spotify.ID, err error) {
+// getSpotifyAlbumId returns a matching Spotify album ID. `doLiberalSearch` can 
+// be used to find the first match after modifying the list of fetched albums 
+// to exclude paranthetical expressions at the end of the album names (e.g. 
+// " (Remastered)") which are sometimes returned instead of the original album 
+// name that we'd expect to find. In this case, maybe some newer remastered 
+// album has taken place of the original album in Spotify and the origin album 
+// in its original quality and with its original name is no longer available.
+func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, marketName string, doLiberalSearch bool) (id spotify.ID, err error) {
     defer func() {
         if state := recover(); state != nil {
             err = state.(error)
         }
     }()
 
+    albumAllowCache := allowCache
+    if doLiberalSearch {
+        albumAllowCache = false
+    }
+
     cak := albumKey{
         artistId: artistId,
         albumName: name,
     }
 
-    if allowCache {
+    if albumAllowCache {
         if id, found := cachedAlbums[cak]; found == true {
             return id, nil
         }
     }
 
-// TODO(dustin): !! This isn't returning all albums (e.g. 3 Doors Down's "Away From the Sun").
-// TODO(dustin): Reimplement using GetArtistAlbumsOpt() so that we can pass the type.
-    sp, err := spotify.GetArtistAlbums(artistId)
-    log.PanicIf(err)
+    offset := 0
+    limit := SpotifyAlbumReadBatchSize
 
-    distilledAvailable := make([]string, len(sp.Albums))
-    for i, a := range sp.Albums {
-        if a.AlbumType != "album" {
-            continue
-        }
-
-        thisName := strings.ToLower(a.Name)
-        distilledAvailable[i] = thisName
-
-        if thisName == name {
-            sLog.Debugf(sa.ctx, "Found ID for album [%s] under artist-ID [%s]: [%s]", name, artistId, name)
-
-            if allowCache {
-                cachedAlbums[cak] = a.ID
-            }
-
-            return a.ID, nil
-        }
+    // Filter by market (otherwise we'll see a lot of duplicates, some of which 
+    // won't be relevant).
+    o := &spotify.Options{
+        Offset: &offset,
+        Limit: &limit,
     }
 
-    sLog.Debugf(sa.ctx, "Album [%s] under artist-ID [%s] not found.", name, artistId)
+    if marketName != "" {
+        o.Country = &marketName
+    }
+
+    distilledAvailable := make([]string, 0)
+
+    for {
+        ata := spotify.AlbumTypeAlbum
+        sp, err := spotify.GetArtistAlbumsOpt(artistId, o, &ata)
+        log.PanicIf(err)
+
+        if len(sp.Albums) == 0 {
+            break
+        }
+
+        for _, a := range sp.Albums {
+            if a.AlbumType != "album" {
+                continue
+            }
+
+            thisName := strings.ToLower(a.Name)
+            distilledAvailable = append(distilledAvailable, a.Name)
+
+            searchableName := thisName
+
+            if doLiberalSearch {
+                i := strings.LastIndex(searchableName, "(")
+
+                if i > -1 {
+                    sLog.Debugf(nil, "Stripping paranthetical expression from album name: [%s]", searchableName)
+
+                    i--
+
+                    for i > 0 && string(searchableName[i]) == " " {
+                        i--
+                    }
+
+                    searchableName = searchableName[:i + 1]
+                }
+            }
+
+            if searchableName == name {
+                sLog.Debugf(sa.ctx, "Found ID for album under artist-ID [%s]: [%s] found as [%s]", artistId, name, thisName)
+
+                if albumAllowCache {
+                    cachedAlbums[cak] = a.ID
+                }
+
+                return a.ID, nil
+            }
+        }
+
+        offset := *o.Offset + SpotifyAlbumReadBatchSize
+        o.Offset = &offset
+    }
+
+    sLog.Debugf(sa.ctx, "Album [%s] under artist-ID [%s] not found (DO-LIBERAL-SEARCH=[%v]).", name, artistId, doLiberalSearch)
 
     if printCandidates {
         for i, thisName := range distilledAvailable {
@@ -306,7 +365,7 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string) (id
     return spotify.ID(""), nil
 }
 
-func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumName string, trackName string) (spotifyTrackId spotify.ID, err error) {
+func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumName string, trackName string, marketName string) (spotifyTrackId spotify.ID, err error) {
     defer func() {
         if state := recover(); state != nil {
             err = state.(error)
@@ -316,7 +375,11 @@ func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumNam
     artistId, err := sa.getSpotifyArtistId(artistName)
     log.PanicIf(err)
 
-    albumId, err := sa.getSpotifyAlbumId(artistId, albumName)
+    albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false)
+    if log.Is(err, ErrSpotifyAlbumNotFound) == true {
+        albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true)
+    }
+
     log.PanicIf(err)
 
     trackId, err := sa.getSpotifyTrackId(albumId, trackName)
