@@ -2,7 +2,6 @@ package main
 
 import (
     "os"
-    "fmt"
 
     "golang.org/x/net/context"
     "github.com/dsoprea/go-logging"
@@ -56,7 +55,6 @@ func main() {
 
     o := new(options)
     if _, err := flags.Parse(o); err != nil {
-        fmt.Println(err)
         os.Exit(1)
     }
 
