@@ -127,124 +127,128 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
     trackInfo, err := amc.GetFavoriteTracks(i.offset, i.batchSize)
     log.PanicIf(err)
 
-    if len(trackInfo) > 0 {
-        ids := make([]string, len(trackInfo))
+    if len(trackInfo) == 0 {
+        return 0, 0, nil, nil
+    }
 
-        for i, info := range trackInfo {
-            ids[i] = info.Id
+    ids := make([]string, len(trackInfo))
+
+    for i, info := range trackInfo {
+        ids[i] = info.Id
+    }
+
+    mc := napster.NewMetadataClient(i.ctx, i.hc, i.napsterApiKey)
+    tracks, err := mc.GetTrackDetail(ids...)
+    log.PanicIf(err)
+
+    missingArtists := make(map[string]bool)
+    missingAlbums := make(map[albumKeyNames]bool)
+
+    for _, track := range tracks {
+        // We're going to check a couple of different things and be 
+        // discriminating in what we print. This should allow us to 
+        // efficiently cherry-pick artists, maybe even one at a time, to 
+        // add to the playlist.
+
+        nt := i.getNapsterNormalizedTrack(&track)
+
+        iLog.Debugf(nil, "Searching: %s", nt)
+
+        // One of the artists on the track must be in the `onlyArtists` 
+        // list. If track is *not* in Spotify and not in the `onlyArtists` 
+        // list, skip and print. 
+        //
+        // Our complexity is higher because each track is associated with 
+        // potentially more than one artist.
+
+        found := false
+        for _, anTrack := range nt.ArtistNames {
+            for _, anAllowed := range onlyArtists {
+                if anAllowed == anTrack {
+                    found = true
+                    break
+                }
+            }
         }
 
-        mc := napster.NewMetadataClient(i.ctx, i.hc, i.napsterApiKey)
-        tracks, err := mc.GetTrackDetail(ids...)
-        log.PanicIf(err)
+        if found == false {
+            skipped++
 
-        missingArtists := make(map[string]bool)
-        missingAlbums := make(map[albumKeyNames]bool)
-
-        for _, track := range tracks {
-            // We're going to check a couple of different things and be 
-            // discriminating in what we print. This should allow us to 
-            // efficiently cherry-pick artists, maybe even one at a time, to 
-            // add to the playlist.
-
-            nt := i.getNapsterNormalizedTrack(&track)
-
-            // One of the artists on the track must be in the `onlyArtists` 
-            // list. If track is *not* in Spotify and not in the `onlyArtists` 
-            // list, skip and print. 
-            //
-            // Our complexity is higher because each track is associated with 
-            // potentially more than one artist.
-
-            found := false
-            for _, anTrack := range nt.ArtistNames {
-                for _, anAllowed := range onlyArtists {
-                    if anAllowed == anTrack {
-                        found = true
-                        break
-                    }
-                }
+            for _, an := range nt.ArtistNames {
+                i.artistNotices[an] = true
             }
 
-            if found == false {
-                skipped++
+            continue
+        }
 
-                for _, an := range nt.ArtistNames {
-                    i.artistNotices[an] = true
-                }
+        // If track is not in Spotify and *in* the list, print and add.
+        //
+        // Note that this struct will only have exactly one artist (Napster only returns one). 
 
-                continue
+        artistName := strings.ToLower(nt.ArtistNames[0])
+        albumName := strings.ToLower(nt.AlbumName)
+
+        artistPhrase := fmt.Sprintf("[%s]", artistName)
+        albumPhrase := fmt.Sprintf("[%s] [%s]", artistName, albumName)
+        trackPhrase := fmt.Sprintf("[%s] [%s] [%s]", artistName, albumName, nt.TrackName)
+
+        akn := albumKeyNames{
+            artistName: artistName,
+            albumName: albumName,
+        }
+
+        // Short circuit if we've previously missed on this artist or album.
+
+        if _, found := missingArtists[artistName]; found == true {
+            continue
+        }
+
+        if _, found := missingAlbums[akn]; found == true {
+            continue
+        }
+
+        // Do the lookup.
+
+        spotifyTrackId, err := i.sa.GetSpotifyTrackIdWithNames(artistName, albumName, nt.TrackName, i.marketName)
+        if log.Is(err, ErrSpotifyArtistNotFound) == true {
+            if _, found := missingArtists[artistName]; found == false {
+                missing = append(missing, artistPhrase)
+                missingArtists[artistName] = true
+
+                iLog.Warningf(i.ctx, "ARTIST NOT FOUND IN SPOTIFY: %s", artistPhrase)
             }
 
-            // If track is not in Spotify and *in* the list, print and add.
-            //
-            // Note that this struct will only have exactly one artist (Napster only returns one). 
-
-            artistName := strings.ToLower(nt.ArtistNames[0])
-            albumName := strings.ToLower(nt.AlbumName)
-
-            artistPhrase := fmt.Sprintf("[%s]", artistName)
-            albumPhrase := fmt.Sprintf("[%s] [%s]", artistName, albumName)
-            trackPhrase := fmt.Sprintf("[%s] [%s] [%s]", artistName, albumName, nt.TrackName)
-
-            akn := albumKeyNames{
-                artistName: artistName,
-                albumName: albumName,
-            }
-
-            // Short circuit if we've previously missed on this artist or album.
-
-            if _, found := missingArtists[artistName]; found == true {
-                continue
-            }
-
-            if _, found := missingAlbums[akn]; found == true {
-                continue
-            }
-
-            // Do the lookup.
-
-            spotifyTrackId, err := i.sa.GetSpotifyTrackIdWithNames(artistName, albumName, nt.TrackName, i.marketName)
-            if log.Is(err, ErrSpotifyArtistNotFound) == true {
-                if _, found := missingArtists[artistName]; found == false {
-                    missing = append(missing, artistPhrase)
-                    missingArtists[artistName] = true
-
-                    iLog.Warningf(i.ctx, "ARTIST NOT FOUND IN SPOTIFY: %s", artistPhrase)
-                }
-
-                continue
-            } else if log.Is(err, ErrSpotifyAlbumNotFound) == true {
-                if _, found := missingAlbums[akn]; found == false {
+            continue
+        } else if log.Is(err, ErrSpotifyAlbumNotFound) == true {
+            if _, found := missingAlbums[akn]; found == false {
 // TODO(dustin): !! This is still printing things twice.
-                    missing = append(missing, albumPhrase)
-                    missingAlbums[akn] = true
+                missing = append(missing, albumPhrase)
+                missingAlbums[akn] = true
 
-                    iLog.Warningf(i.ctx, "ALBUM NOT FOUND IN SPOTIFY: %s", albumPhrase)
-                }
-
-                continue
-            } else if log.Is(err, ErrSpotifyTrackNotFound) == true {
-                missing = append(missing, trackPhrase)
-
-                iLog.Warningf(i.ctx, "TRACK NOT FOUND IN SPOTIFY: %s", trackPhrase)
-
-                continue
-            } else if err != nil {
-                log.PanicIf(err)
+                iLog.Warningf(i.ctx, "ALBUM NOT FOUND IN SPOTIFY: %s", albumPhrase)
             }
 
-            // If track is already in Spotify, don't do or print anything. 
+            continue
+        } else if log.Is(err, ErrSpotifyTrackNotFound) == true {
+            missing = append(missing, trackPhrase)
 
-            if _, found := i.spotifyIndex[spotifyTrackId]; found == true {
-                iLog.Infof(nil, "Track already in playlist: [%s]", spotifyTrackId)
-                continue
-            }
+            iLog.Warningf(i.ctx, "TRACK NOT FOUND IN SPOTIFY: %s", trackPhrase)
 
-            iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s] => [%s]", artistName, albumName, nt.TrackName, spotifyTrackId)
-
-            collector.idList = append(collector.idList, spotifyTrackId)
+            continue
+        } else if err != nil {
+            log.PanicIf(err)
         }
+
+        // If track is already in Spotify, don't do or print anything. 
+
+        if _, found := i.spotifyIndex[spotifyTrackId]; found == true {
+            iLog.Infof(nil, "Track already in playlist: [%s]", spotifyTrackId)
+            continue
+        }
+
+        iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s] => [%s]", artistName, albumName, nt.TrackName, spotifyTrackId)
+
+        collector.idList = append(collector.idList, spotifyTrackId)
     }
 
     return len(trackInfo), skipped, missing, nil
@@ -322,7 +326,11 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
     skipped := 0
     missing := make([]string, 0)
 
+    j := 0
+
     for {
+        iLog.Debugf(nil, "Resolving batch (%d).", j + 1)
+
         added, currentSkipped, missingUpdated, err := i.importBatch(amc, onlyArtists, collector, missing)
         log.PanicIf(err)
 
@@ -336,7 +344,10 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
         iLog.Debugf(i.ctx, "(%d) tracks received starting at index (%d).", added, i.offset)
 
         i.offset += added
+        j++
     }
+
+    iLog.Debugf(nil, "Resolution finished after (%d) batches.", j)
 
     if len(i.artistNotices) > 0 {
         ignoredArtists := make([]string, len(i.artistNotices))

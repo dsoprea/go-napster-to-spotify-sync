@@ -163,8 +163,19 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
     var sr *spotify.SearchResult
     var lastFound spotify.ID
 
-    for {
+    // Though we support more than one page, we'll limit it to one page for now 
+    // under the assumption that we should never need to hit the second.
+    maxPages := 1
+
+    for j := 0; j < maxPages; j++ {
+        sLog.Debugf(nil, "Search for artist [%s] page (%d).", name, j)
+
         if sr == nil {
+            // Extra security due to some concerns that we have.
+            if j > 0 {
+                log.Panicf("for some reason we aren't search against a new artist page on the second iteration")
+            }
+
             sLog.Debugf(sa.ctx, "Searching for artist: [%s]", name)
             sr, err = sa.spotifyAuth.Client.Search(name, spotify.SearchTypeArtist)
             log.PanicIf(err)
@@ -173,6 +184,11 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
         } else if err != nil {
             sLog.Debugf(sa.ctx, "(Retrieving next page of results.)")
             log.Panic(err)
+        }
+
+        // Safety.
+        if len(sr.Artists.Artists) == 0 {
+            log.Panicf("no artists")
         }
 
         for i, a := range sr.Artists.Artists {
@@ -189,10 +205,10 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
                 lastFound = a.ID
             }
         }
-    }
 
-    if lastFound != spotify.ID("") {
-        return lastFound, nil
+        if lastFound != spotify.ID("") {
+            return lastFound, nil
+        }
     }
 
     log.Panic(ErrSpotifyArtistNotFound)
@@ -212,6 +228,8 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
             err = state.(error)
         }
     }()
+
+    sLog.Debugf(nil, "Searching for album [%s] under artist with ID [%s].", name, artistId)
 
     albumAllowCache := allowCache
     if doLiberalSearch {
