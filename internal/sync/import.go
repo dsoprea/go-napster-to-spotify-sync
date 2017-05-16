@@ -43,7 +43,7 @@ type Importer struct {
     batchSize int
     offset int
 
-    spotifyIndex map[string]bool
+    spotifyIndex map[spotify.ID]bool
     artistNotices map[string]bool
 
     marketName string
@@ -54,7 +54,7 @@ type Importer struct {
 func NewImporter(ctx context.Context, napsterApiKey, napsterSecretKey, napsterUsername, napsterPassword string, spotifyAuth *SpotifyContext, spotifyCache *SpotifyCache, batchSize int, marketName string) *Importer {
     hc := new(http.Client)
 
-    spotifyIndex := make(map[string]bool)
+    spotifyIndex := make(map[spotify.ID]bool)
     artistNotices := make(map[string]bool)
 
     sa := NewSpotifyAdapter(ctx, spotifyAuth)
@@ -142,19 +142,12 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
         missingAlbums := make(map[albumKeyNames]bool)
 
         for _, track := range tracks {
-            nt := i.getNapsterNormalizedTrack(&track)
-
             // We're going to check a couple of different things and be 
             // discriminating in what we print. This should allow us to 
             // efficiently cherry-pick artists, maybe even one at a time, to 
             // add to the playlist.
 
-            // If track is already in Spotify, don't do or print anything. 
-
-            h := nt.Hash() 
-            if _, found := i.spotifyIndex[h]; found == true {
-                continue
-            }
+            nt := i.getNapsterNormalizedTrack(&track)
 
             // One of the artists on the track must be in the `onlyArtists` 
             // list. If track is *not* in Spotify and not in the `onlyArtists` 
@@ -241,7 +234,14 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
                 log.PanicIf(err)
             }
 
-            iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s]", artistName, albumName, nt.TrackName)
+            // If track is already in Spotify, don't do or print anything. 
+
+            if _, found := i.spotifyIndex[spotifyTrackId]; found == true {
+                iLog.Infof(nil, "Track already in playlist: [%s]", spotifyTrackId)
+                continue
+            }
+
+            iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s] => [%s]", artistName, albumName, nt.TrackName, spotifyTrackId)
 
             collector.idList = append(collector.idList, spotifyTrackId)
         }
@@ -250,7 +250,7 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
     return len(trackInfo), skipped, missing, nil
 }
 
-func (i *Importer) buildSpotifyIndex(tracks []*NormalizedTrack) (err error) {
+func (i *Importer) buildSpotifyIndex(tracks []spotify.ID) (err error) {
     defer func() {
         if state := recover(); state != nil {
             err = state.(error)
@@ -259,9 +259,8 @@ func (i *Importer) buildSpotifyIndex(tracks []*NormalizedTrack) (err error) {
 
     iLog.Debugf(i.ctx, "Building index with existing songs.")
 
-    for _, nt := range tracks {
-        h := nt.Hash()
-        i.spotifyIndex[h] = true
+    for _, id := range tracks {
+        i.spotifyIndex[id] = true
     }
 
     return nil
