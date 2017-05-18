@@ -111,6 +111,9 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
         }
     }()
 
+// TODO(dustin): !! Update the Spotify library to store the retry timestamp on the client.
+// TODO(dustin): !! We need to work through the artists in batches. Catch the error, wait until the right time has elapsed, and loop.
+
     if len(onlyArtists) == 0 {
         log.Panic(fmt.Errorf("at least one artist must be given to import"))
     }
