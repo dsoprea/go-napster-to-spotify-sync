@@ -265,7 +265,7 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
 
     for {
         ata := spotify.AlbumTypeAlbum
-        sp, err := spotify.GetArtistAlbumsOpt(artistId, o, &ata)
+        sp, err := spotify.spotifyAuth.Client.GetArtistAlbumsOpt(artistId, o, &ata)
         log.PanicIf(err)
 
         if len(sp.Albums) == 0 {
@@ -345,7 +345,7 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doP
     }
 
     if found == false {
-        stp, err := spotify.GetAlbumTracks(albumId)
+        stp, err := spotify.spotifyAuth.Client.GetAlbumTracks(albumId)
         log.PanicIf(err)
 
         tracks = make(map[string]spotify.ID)
