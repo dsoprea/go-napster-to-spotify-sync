@@ -12,7 +12,6 @@ import (
     "github.com/dsoprea/go-logging"
     "github.com/dsoprea/go-napster"
     "github.com/zmb3/spotify"
-    "github.com/randomingenuity/go-ri/common"
 )
 
 // Misc
@@ -84,32 +83,24 @@ func NewImporter(ctx context.Context, napsterApiKey, napsterSecretKey, napsterUs
 
 
 type NormalizedTrack struct {
-    ArtistNames []string
+    ArtistName string
     AlbumName string
     TrackName string
 }
 
 func (nt NormalizedTrack) String() string {
-    return fmt.Sprintf("TRACK<%v [%s] [%s]>", nt.ArtistNames, nt.AlbumName, nt.TrackName)
-}
-
-func (nt *NormalizedTrack) Hash() string {
-    parts := append([]string {}, nt.AlbumName, nt.TrackName)
-    parts = append(parts, nt.ArtistNames...)
-
-    return ricommon.EncodeStringsToSha1DigestString(parts)
+    return fmt.Sprintf("TRACK<[%s] [%s] [%s]>", nt.ArtistName, nt.AlbumName, nt.TrackName)
 }
 
 func (i *Importer) getNapsterNormalizedTrack(track *napster.MetadataTrackDetail) *NormalizedTrack {
-    artistNames := []string { strings.ToLower(track.ArtistName) }
-
+    artistName := strings.ToLower(track.ArtistName)
     trackName := strings.ToLower(track.Name)
     albumName := strings.ToLower(track.AlbumName)
 
     return &NormalizedTrack{
         TrackName: trackName,
         AlbumName: albumName,
-        ArtistNames: artistNames,
+        ArtistName: artistName,
     }
 }
 
@@ -144,6 +135,7 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
     missingArtists := make(map[string]bool)
     missingAlbums := make(map[albumKeyNames]bool)
 
+    groupedTracks := make(map[albumKeyNames][]string)
     for _, track := range tracks {
         // We're going to check a couple of different things and be 
         // discriminating in what we print. This should allow us to 
@@ -152,7 +144,20 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
 
         nt := i.getNapsterNormalizedTrack(&track)
 
-        iLog.Debugf(nil, "Searching: %s", nt)
+        akn := albumKeyNames{
+            artistName: nt.ArtistName,
+            albumName: nt.AlbumName,
+        }
+
+        if groupedTracksList, found := groupedTracks[akn]; found == true {
+            groupedTracks[akn] = append(groupedTracksList, nt.TrackName)
+        } else {
+            groupedTracks[akn] = []string { nt.TrackName }
+        }
+    }
+
+    for akn, tracks := range groupedTracks {
+        iLog.Debugf(nil, "Searching for tracks within: [%s] [%s]", akn.artistName, akn.albumName)
 
         // One of the artists on the track must be in the `onlyArtists` 
         // list. If track is *not* in Spotify and not in the `onlyArtists` 
@@ -162,21 +167,17 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
         // potentially more than one artist.
 
         found := false
-        for _, anTrack := range nt.ArtistNames {
-            for _, anAllowed := range onlyArtists {
-                if anAllowed == anTrack {
-                    found = true
-                    break
-                }
+        for _, anAllowed := range onlyArtists {
+            if anAllowed == akn.artistName {
+                found = true
+                break
             }
         }
 
         if found == false {
             skipped++
 
-            for _, an := range nt.ArtistNames {
-                i.artistNotices[an] = true
-            }
+            i.artistNotices[akn.artistName] = true
 
             continue
         }
@@ -185,21 +186,12 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
         //
         // Note that this struct will only have exactly one artist (Napster only returns one). 
 
-        artistName := strings.ToLower(nt.ArtistNames[0])
-        albumName := strings.ToLower(nt.AlbumName)
-
-        artistPhrase := fmt.Sprintf("[%s]", artistName)
-        albumPhrase := fmt.Sprintf("[%s] [%s]", artistName, albumName)
-        trackPhrase := fmt.Sprintf("[%s] [%s] [%s]", artistName, albumName, nt.TrackName)
-
-        akn := albumKeyNames{
-            artistName: artistName,
-            albumName: albumName,
-        }
+        artistPhrase := fmt.Sprintf("[%s]", akn.artistName)
+        albumPhrase := fmt.Sprintf("[%s] [%s]", akn.artistName, akn.albumName)
 
         // Short circuit if we've previously missed on this artist or album.
 
-        if _, found := missingArtists[artistName]; found == true {
+        if _, found := missingArtists[akn.artistName]; found == true {
             continue
         }
 
@@ -209,11 +201,11 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
 
         // Do the lookup.
 
-        spotifyTrackId, err := i.sa.GetSpotifyTrackIdWithNames(artistName, albumName, nt.TrackName, i.marketName)
+        spotifyTrackIds, missingTrackNames, err := i.sa.GetSpotifyTrackIdsWithNames(akn.artistName, akn.albumName, tracks, i.marketName)
         if log.Is(err, ErrSpotifyArtistNotFound) == true {
-            if _, found := missingArtists[artistName]; found == false {
-                missing = append(missing, artistPhrase)
-                missingArtists[artistName] = true
+            if _, found := missingArtists[akn.artistName]; found == false {
+                missing = append(missing, akn.artistName)
+                missingArtists[akn.artistName] = true
 
                 iLog.Warningf(i.ctx, "ARTIST NOT FOUND IN SPOTIFY: %s", artistPhrase)
             }
@@ -229,26 +221,35 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
             }
 
             continue
-        } else if log.Is(err, ErrSpotifyTrackNotFound) == true {
-            missing = append(missing, trackPhrase)
-
-            iLog.Warningf(i.ctx, "TRACK NOT FOUND IN SPOTIFY: %s", trackPhrase)
-
-            continue
         } else if err != nil {
             log.PanicIf(err)
         }
 
-        // If track is already in Spotify, don't do or print anything. 
+        if len(missingTrackNames) > 0 {
+            for _, trackName := range missingTrackNames {
+                trackPhrase := fmt.Sprintf("[%s] [%s] [%s]", akn.artistName, akn.albumName, trackName)
 
-        if _, found := i.spotifyIndex[spotifyTrackId]; found == true {
-            iLog.Infof(nil, "Track already in playlist: [%s]", spotifyTrackId)
+                missing = append(missing, trackPhrase)
+                iLog.Warningf(i.ctx, "TRACK NOT FOUND IN SPOTIFY: %s", trackPhrase)
+            }
+        }
+
+        if len(spotifyTrackIds) == 0 {
+            iLog.Warningf(i.ctx, "No favorite tracks from this album were found.")
             continue
         }
 
-        iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s] => [%s]", artistName, albumName, nt.TrackName, spotifyTrackId)
+        // If track is already in Spotify, don't do or print anything. 
 
-        collector.idList = append(collector.idList, spotifyTrackId)
+        for _, spotifyTrackId := range spotifyTrackIds {
+            if _, found := i.spotifyIndex[spotifyTrackId]; found == true {
+                iLog.Infof(nil, "Track already in playlist: [%s]", spotifyTrackId)
+                continue
+            }
+
+            iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s]", akn.artistName, akn.albumName, spotifyTrackId)
+            collector.idList = append(collector.idList, spotifyTrackId)
+        }
     }
 
     return len(trackInfo), skipped, missing, nil

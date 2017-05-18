@@ -130,23 +130,6 @@ func NewSpotifyAdapter(ctx context.Context, spotifyAuth *SpotifyContext) *Spotif
     }
 }
 
-func (sa *SpotifyAdapter) getSpotifyNormalizedTrack(ft *spotify.FullTrack) *NormalizedTrack {
-    artistNames := make([]string, len(ft.Artists))
-    for i, a := range ft.Artists {
-        currentArtistName := strings.ToLower(a.Name)
-        artistNames[i] = currentArtistName
-    }
-
-    albumName := strings.ToLower(ft.Album.Name)
-    trackName := strings.ToLower(ft.Name)
-
-    return &NormalizedTrack{
-        TrackName: trackName,
-        AlbumName: albumName,
-        ArtistNames: artistNames,
-    }
-}
-
 func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err error) {
     defer func() {
         if state := recover(); state != nil {
@@ -265,7 +248,7 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
 
     for {
         ata := spotify.AlbumTypeAlbum
-        sp, err := spotify.spotifyAuth.Client.GetArtistAlbumsOpt(artistId, o, &ata)
+        sp, err := sa.spotifyAuth.Client.GetArtistAlbumsOpt(artistId, o, &ata)
         log.PanicIf(err)
 
         if len(sp.Albums) == 0 {
@@ -327,6 +310,69 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
 }
 
 // getSpotifyTrackId Find and add the track to the Spotify playlist.
+func (sa *SpotifyAdapter) getSpotifyTrackIds(albumId spotify.ID, names []string, doPrintCandidates bool) (ids []spotify.ID, missing []string, err error) {
+    defer func() {
+        if state := recover(); state != nil {
+            err = state.(error)
+        }
+    }()
+
+    found := false
+    var tracks map[string]spotify.ID
+
+    if allowCache {
+        tracks, found = cachedTracks[albumId]
+    }
+
+    if found == false {
+        stp, err := sa.spotifyAuth.Client.GetAlbumTracks(albumId)
+        log.PanicIf(err)
+
+        tracks = make(map[string]spotify.ID)
+        for _, track := range stp.Tracks {
+            spotifyTrackName := invalidTrackCharsRx.ReplaceAllString(track.Name, "")
+            spotifyTrackName = spaceCharsRx.ReplaceAllString(spotifyTrackName, " ")
+            spotifyTrackName = strings.ToLower(spotifyTrackName)
+
+            tracks[spotifyTrackName] = track.ID
+        }
+
+        if allowCache {
+            cachedTracks[albumId] = tracks
+        }
+    }
+
+    ids = make([]spotify.ID, 0)
+    missing = make([]string, 0)
+
+    for _, name := range names {
+        name = invalidTrackCharsRx.ReplaceAllString(name, "")
+        name = spaceCharsRx.ReplaceAllString(name, " ")
+
+        if id, found := tracks[name]; found == true {
+            ids = append(ids, id)
+            sLog.Debugf(sa.ctx, "Found: [%s] [%s] => [%s]", albumId, name, id)
+        } else {
+            missing = append(missing, name)
+            sLog.Debugf(sa.ctx, "Track [%s] under album-ID [%s] not found.", name, albumId)
+        }
+    }
+
+    if len(missing) > 0 && doPrintCandidates {
+        sLog.Debugf(sa.ctx, "(%d) tracks are available in album-ID [%s].", len(tracks), albumId)
+
+        i := 0
+        for thisName, _ := range tracks {
+            sLog.Debugf(sa.ctx, "Available track under album-ID [%s]: (%d) [%s]", albumId, i, thisName)
+        
+            i++
+        }
+    }
+
+    return ids, missing, nil
+}
+
+// getSpotifyTrackId Find and add the track to the Spotify playlist.
 func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doPrintCandidates bool) (id spotify.ID, err error) {
     defer func() {
         if state := recover(); state != nil {
@@ -345,7 +391,7 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doP
     }
 
     if found == false {
-        stp, err := spotify.spotifyAuth.Client.GetAlbumTracks(albumId)
+        stp, err := sa.spotifyAuth.Client.GetAlbumTracks(albumId)
         log.PanicIf(err)
 
         tracks = make(map[string]spotify.ID)
@@ -385,6 +431,30 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doP
     return spotify.ID(""), nil
 }
 
+func (sa *SpotifyAdapter) GetSpotifyTrackIdsWithNames(artistName string, albumName string, tracks []string, marketName string) (foundTracks []spotify.ID, missingTracks []string, err error) {
+    defer func() {
+        if state := recover(); state != nil {
+            err = state.(error)
+        }
+    }()
+
+    artistId, err := sa.getSpotifyArtistId(artistName)
+    log.PanicIf(err)
+
+    albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
+    if log.Is(err, ErrSpotifyAlbumNotFound) == true {
+        albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
+        log.PanicIf(err)
+    } else if err != nil {
+        log.Panic(err)
+    }
+
+    foundTracks, missingTracks, err = sa.getSpotifyTrackIds(albumId, tracks, true)
+    log.PanicIf(err)
+
+    return foundTracks, missingTracks, nil
+}
+
 func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumName string, trackName string, marketName string) (spotifyTrackId spotify.ID, err error) {
     defer func() {
         if state := recover(); state != nil {
@@ -398,9 +468,9 @@ func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumNam
     albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
     if log.Is(err, ErrSpotifyAlbumNotFound) == true {
         albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
+    } else if err != nil {
+        log.Panic(err)
     }
-
-    log.PanicIf(err)
 
     trackId, err := sa.getSpotifyTrackId(albumId, trackName, true)
     log.PanicIf(err)
