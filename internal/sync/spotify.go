@@ -1,509 +1,506 @@
 package gnsssync
 
 import (
-    "fmt"
-    "strings"
-    "regexp"
+	"fmt"
+	"regexp"
+	"strings"
 
-    "golang.org/x/net/context"
+	"golang.org/x/net/context"
 
-    "github.com/dsoprea/go-logging"
-    "github.com/zmb3/spotify"
+	"github.com/dsoprea/go-logging"
+	"github.com/zmb3/spotify"
 )
 
 // Config
 const (
-    SpotifyAlbumReadBatchSize = 50
+	SpotifyAlbumReadBatchSize = 50
 )
 
 // Errors
 var (
-    ErrSpotifyArtistNotFound = fmt.Errorf("artist not found in Spotify")
-    ErrSpotifyAlbumNotFound = fmt.Errorf("album not found in Spotify")
-    ErrSpotifyTrackNotFound = fmt.Errorf("track not found in Spotify")
+	ErrSpotifyArtistNotFound = fmt.Errorf("artist not found in Spotify")
+	ErrSpotifyAlbumNotFound  = fmt.Errorf("album not found in Spotify")
+	ErrSpotifyTrackNotFound  = fmt.Errorf("track not found in Spotify")
 )
 
 // Cache
 var (
-    cachedArtists = make(map[string]spotify.ID)
-    cachedAlbums = make(map[albumKey]spotify.ID)
-    cachedTracks = make(map[spotify.ID]map[string]spotify.ID)
+	cachedArtists = make(map[string]spotify.ID)
+	cachedAlbums  = make(map[albumKey]spotify.ID)
+	cachedTracks  = make(map[spotify.ID]map[string]spotify.ID)
 )
 
 // Misc
 var (
-    sLog = log.NewLogger("gnss.spotify")
-    invalidTrackCharsRx *regexp.Regexp
-    spaceCharsRx *regexp.Regexp
-    allowCache = true
+	sLog                = log.NewLogger("gnss.spotify")
+	invalidTrackCharsRx *regexp.Regexp
+	spaceCharsRx        *regexp.Regexp
+	allowCache          = true
 )
 
-
 type albumKey struct {
-    artistId spotify.ID
-    albumName string
+	artistId  spotify.ID
+	albumName string
 }
 
-
 type SpotifyCache struct {
-    ctx context.Context
-    spotifyAuth *SpotifyContext
+	ctx         context.Context
+	spotifyAuth *SpotifyContext
 
-    playlistCache map[string]spotify.ID
-    userId string
+	playlistCache map[string]spotify.ID
+	userId        string
 }
 
 func NewSpotifyCache(ctx context.Context, spotifyAuth *SpotifyContext) *SpotifyCache {
-    playlistCache := make(map[string]spotify.ID)
+	playlistCache := make(map[string]spotify.ID)
 
-    return &SpotifyCache{
-        ctx: ctx,
-        spotifyAuth: spotifyAuth,
-        playlistCache: playlistCache,
-    }
+	return &SpotifyCache{
+		ctx:           ctx,
+		spotifyAuth:   spotifyAuth,
+		playlistCache: playlistCache,
+	}
 }
 
 func (sc *SpotifyCache) GetSpotifyPlaylistId(spotifyUserId string, playlistName string) (id spotify.ID, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    if id, found := sc.playlistCache[playlistName]; found == true {
-        return id, nil
-    }
+	if id, found := sc.playlistCache[playlistName]; found == true {
+		return id, nil
+	}
 
-    sLog.Debugf(sc.ctx, "Getting playlist ID: [%s]", playlistName)
+	sLog.Debugf(sc.ctx, "Getting playlist ID: [%s]", playlistName)
 
-    splp, err := sc.spotifyAuth.Client.GetPlaylistsForUser(spotifyUserId)
-    log.PanicIf(err)
+	splp, err := sc.spotifyAuth.Client.GetPlaylistsForUser(spotifyUserId)
+	log.PanicIf(err)
 
-    playlistName = strings.ToLower(playlistName)
-    for _, p := range splp.Playlists {
-        currentPlaylistName := strings.ToLower(p.Name)
+	playlistName = strings.ToLower(playlistName)
+	for _, p := range splp.Playlists {
+		currentPlaylistName := strings.ToLower(p.Name)
 
-        if currentPlaylistName == playlistName {
-            sc.playlistCache[playlistName] = p.ID
+		if currentPlaylistName == playlistName {
+			sc.playlistCache[playlistName] = p.ID
 
-            return p.ID, nil
-        }
-    }
+			return p.ID, nil
+		}
+	}
 
-    log.Panic(fmt.Errorf("playlist not found: [%s]", playlistName))
+	log.Panic(fmt.Errorf("playlist not found: [%s]", playlistName))
 
-    // Obligatory.
-    return spotify.ID(""), nil
+	// Obligatory.
+	return spotify.ID(""), nil
 }
 
 func (sc *SpotifyCache) GetSpotifyCurrentUserId() (id string, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    if sc.userId != "" {
-        return sc.userId, nil
-    }
+	if sc.userId != "" {
+		return sc.userId, nil
+	}
 
-    sLog.Debugf(sc.ctx, "Getting current user ID.")
+	sLog.Debugf(sc.ctx, "Getting current user ID.")
 
-    pu, err := sc.spotifyAuth.Client.CurrentUser()
-    log.PanicIf(err)
+	pu, err := sc.spotifyAuth.Client.CurrentUser()
+	log.PanicIf(err)
 
-    sc.userId = pu.ID
+	sc.userId = pu.ID
 
-    return pu.ID, nil
+	return pu.ID, nil
 }
 
-
 type SpotifyAdapter struct {
-    ctx context.Context
-    spotifyAuth *SpotifyContext
+	ctx         context.Context
+	spotifyAuth *SpotifyContext
 }
 
 func NewSpotifyAdapter(ctx context.Context, spotifyAuth *SpotifyContext) *SpotifyAdapter {
-    return &SpotifyAdapter{
-        ctx: ctx,
-        spotifyAuth: spotifyAuth,
-    }
+	return &SpotifyAdapter{
+		ctx:         ctx,
+		spotifyAuth: spotifyAuth,
+	}
 }
 
 func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    if allowCache {
-        if id, found := cachedArtists[name]; found == true {
-            return id, nil
-        }
-    }
+	if allowCache {
+		if id, found := cachedArtists[name]; found == true {
+			return id, nil
+		}
+	}
 
-    var sr *spotify.SearchResult
-    var lastFound spotify.ID
+	var sr *spotify.SearchResult
+	var lastFound spotify.ID
 
-    // Though we support more than one page, we'll limit it to one page for now 
-    // under the assumption that we should never need to hit the second.
-    maxPages := 1
+	// Though we support more than one page, we'll limit it to one page for now
+	// under the assumption that we should never need to hit the second.
+	maxPages := 1
 
-    for j := 0; j < maxPages; j++ {
-        sLog.Debugf(nil, "Search for artist [%s] page (%d).", name, j)
+	for j := 0; j < maxPages; j++ {
+		sLog.Debugf(nil, "Search for artist [%s] page (%d).", name, j)
 
-        if sr == nil {
-            // Extra security due to some concerns that we have.
-            if j > 0 {
-                log.Panicf("for some reason we aren't search against a new artist page on the second iteration")
-            }
+		if sr == nil {
+			// Extra security due to some concerns that we have.
+			if j > 0 {
+				log.Panicf("for some reason we aren't search against a new artist page on the second iteration")
+			}
 
-            sLog.Debugf(sa.ctx, "Searching for artist: [%s]", name)
-            sr, err = sa.spotifyAuth.Client.Search(name, spotify.SearchTypeArtist)
-            log.PanicIf(err)
-        } else if err := sa.spotifyAuth.Client.NextArtistResults(sr); err == spotify.ErrNoMorePages {
-            break
-        } else if err != nil {
-            sLog.Debugf(sa.ctx, "(Retrieving next page of results.)")
-            log.Panic(err)
-        }
+			sLog.Debugf(sa.ctx, "Searching for artist: [%s]", name)
+			sr, err = sa.spotifyAuth.Client.Search(name, spotify.SearchTypeArtist)
+			log.PanicIf(err)
+		} else if err := sa.spotifyAuth.Client.NextArtistResults(sr); log.Is(err, spotify.ErrNoMorePages) == true {
+			break
+		} else if err != nil {
+			sLog.Debugf(sa.ctx, "(Retrieving next page of results.)")
+			log.Panic(err)
+		}
 
-        // Safety.
-        if len(sr.Artists.Artists) == 0 {
-            log.Panicf("no artists")
-        }
+		// Safety.
+		if len(sr.Artists.Artists) == 0 {
+			log.Panicf("no artists")
+		}
 
-        for i, a := range sr.Artists.Artists {
-            an := strings.ToLower(a.Name)
+		for i, a := range sr.Artists.Artists {
+			an := strings.ToLower(a.Name)
 
-            if an == name {
-// TODO(dustin): !! We're currently scanning the entire list of matching artists just to get a feel for how many matching artists there are. This might explain why we don't find all of the albums under the first match. UPDATE: Doesn't appear to be a problem.
-                sLog.Debugf(sa.ctx, "Found ID for artist [%s]: (%d) [%s]", name, i, a.ID)
+			if an == name {
+				sLog.Debugf(sa.ctx, "Found ID for artist [%s]: (%d) [%s]", name, i, a.ID)
 
-                if allowCache {
-                    cachedArtists[name] = a.ID
-                }
+				if allowCache {
+					cachedArtists[name] = a.ID
+				}
 
-                lastFound = a.ID
-            }
-        }
+				lastFound = a.ID
+			}
+		}
 
-        if lastFound != spotify.ID("") {
-            return lastFound, nil
-        }
-    }
+		if lastFound != spotify.ID("") {
+			return lastFound, nil
+		}
+	}
 
-    log.Panic(ErrSpotifyArtistNotFound)
-    return spotify.ID(""), nil
+	log.Panic(ErrSpotifyArtistNotFound)
+	return spotify.ID(""), nil
 }
 
-// getSpotifyAlbumId returns a matching Spotify album ID. `doLiberalSearch` can 
-// be used to find the first match after modifying the list of fetched albums 
-// to exclude paranthetical expressions at the end of the album names (e.g. 
-// " (Remastered)") which are sometimes returned instead of the original album 
-// name that we'd expect to find. In this case, maybe some newer remastered 
-// album has taken place of the original album in Spotify and the origin album 
+// getSpotifyAlbumId returns a matching Spotify album ID. `doLiberalSearch` can
+// be used to find the first match after modifying the list of fetched albums
+// to exclude paranthetical expressions at the end of the album names (e.g.
+// " (Remastered)") which are sometimes returned instead of the original album
+// name that we'd expect to find. In this case, maybe some newer remastered
+// album has taken place of the original album in Spotify and the origin album
 // in its original quality and with its original name is no longer available.
 func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, marketName string, doLiberalSearch, doPrintCandidates bool) (id spotify.ID, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    sLog.Debugf(nil, "Searching for album [%s] under artist with ID [%s].", name, artistId)
+	sLog.Debugf(nil, "Searching for album [%s] under artist with ID [%s].", name, artistId)
 
-    albumAllowCache := allowCache
-    if doLiberalSearch {
-        albumAllowCache = false
-    }
+	albumAllowCache := allowCache
+	if doLiberalSearch {
+		albumAllowCache = false
+	}
 
-    cak := albumKey{
-        artistId: artistId,
-        albumName: name,
-    }
+	cak := albumKey{
+		artistId:  artistId,
+		albumName: name,
+	}
 
-    if albumAllowCache {
-        if id, found := cachedAlbums[cak]; found == true {
-            return id, nil
-        }
-    }
+	if albumAllowCache {
+		if id, found := cachedAlbums[cak]; found == true {
+			return id, nil
+		}
+	}
 
-    offset := 0
-    limit := SpotifyAlbumReadBatchSize
+	offset := 0
+	limit := SpotifyAlbumReadBatchSize
 
-    // Filter by market (otherwise we'll see a lot of duplicates, some of which 
-    // won't be relevant).
-    o := &spotify.Options{
-        Offset: &offset,
-        Limit: &limit,
-    }
+	// Filter by market (otherwise we'll see a lot of duplicates, some of which
+	// won't be relevant).
+	o := &spotify.Options{
+		Offset: &offset,
+		Limit:  &limit,
+	}
 
-    if marketName != "" {
-        o.Country = &marketName
-    }
+	if marketName != "" {
+		o.Country = &marketName
+	}
 
-    distilledAvailable := make([]string, 0)
+	distilledAvailable := make([]string, 0)
 
-    for {
-        ata := spotify.AlbumTypeAlbum
-        sp, err := sa.spotifyAuth.Client.GetArtistAlbumsOpt(artistId, o, &ata)
-        log.PanicIf(err)
+	for {
+		ata := spotify.AlbumTypeAlbum
+		sp, err := sa.spotifyAuth.Client.GetArtistAlbumsOpt(artistId, o, &ata)
+		log.PanicIf(err)
 
-        if len(sp.Albums) == 0 {
-            break
-        }
+		if len(sp.Albums) == 0 {
+			break
+		}
 
-        for _, a := range sp.Albums {
-            if a.AlbumType != "album" {
-                continue
-            }
+		for _, a := range sp.Albums {
+			if a.AlbumType != "album" {
+				continue
+			}
 
-            thisName := strings.ToLower(a.Name)
-            distilledAvailable = append(distilledAvailable, a.Name)
+			thisName := strings.ToLower(a.Name)
+			distilledAvailable = append(distilledAvailable, a.Name)
 
-            searchableName := thisName
+			searchableName := thisName
 
-            if doLiberalSearch {
-// TODO(dustin): Cache this.
-                i := strings.LastIndex(searchableName, "(")
+			if doLiberalSearch {
+				// TODO(dustin): Cache this.
+				i := strings.LastIndex(searchableName, "(")
 
-                if i > -1 {
-                    sLog.Debugf(nil, "Stripping any paranthetical expressions from album name: [%s]", searchableName)
+				if i > -1 {
+					sLog.Debugf(nil, "Stripping any paranthetical expressions from album name: [%s]", searchableName)
 
-                    i--
+					i--
 
-                    for i > 0 && string(searchableName[i]) == " " {
-                        i--
-                    }
+					for i > 0 && string(searchableName[i]) == " " {
+						i--
+					}
 
-                    searchableName = searchableName[:i + 1]
-                }
-            }
+					searchableName = searchableName[:i+1]
+				}
+			}
 
-            if searchableName == name {
-                sLog.Debugf(sa.ctx, "Found ID for album under artist-ID [%s]: [%s] found as [%s]", artistId, name, thisName)
+			if searchableName == name {
+				sLog.Debugf(sa.ctx, "Found ID for album under artist-ID [%s]: [%s] found as [%s]", artistId, name, thisName)
 
-                if albumAllowCache {
-                    cachedAlbums[cak] = a.ID
-                }
+				if albumAllowCache {
+					cachedAlbums[cak] = a.ID
+				}
 
-                return a.ID, nil
-            }
-        }
+				return a.ID, nil
+			}
+		}
 
-        offset := *o.Offset + SpotifyAlbumReadBatchSize
-        o.Offset = &offset
-    }
+		offset := *o.Offset + SpotifyAlbumReadBatchSize
+		o.Offset = &offset
+	}
 
-    sLog.Debugf(sa.ctx, "Album [%s] under artist-ID [%s] not found (DO-LIBERAL-SEARCH=[%v]).", name, artistId, doLiberalSearch)
+	sLog.Debugf(sa.ctx, "Album [%s] under artist-ID [%s] not found (DO-LIBERAL-SEARCH=[%v]).", name, artistId, doLiberalSearch)
 
-    if doPrintCandidates {
-        for i, thisName := range distilledAvailable {
-            sLog.Debugf(sa.ctx, "Available album under artist-ID [%s]: (%d) [%s]", artistId, i, thisName)
-        }
-    }
+	if doPrintCandidates {
+		for i, thisName := range distilledAvailable {
+			sLog.Debugf(sa.ctx, "Available album under artist-ID [%s]: (%d) [%s]", artistId, i, thisName)
+		}
+	}
 
-    log.Panic(ErrSpotifyAlbumNotFound)
-    return spotify.ID(""), nil
+	log.Panic(ErrSpotifyAlbumNotFound)
+	return spotify.ID(""), nil
 }
 
-// getSpotifyTrackId Find and add the track to the Spotify playlist.
+// getSpotifyTrackId Find Spotify IDs for the tracks in the given album having
+// the given names (after normalizing the names).
 func (sa *SpotifyAdapter) getSpotifyTrackIds(albumId spotify.ID, names []string, doPrintCandidates bool) (ids []spotify.ID, missing []string, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    found := false
-    var tracks map[string]spotify.ID
+	found := false
+	var tracks map[string]spotify.ID
 
-    if allowCache {
-        tracks, found = cachedTracks[albumId]
-    }
+	if allowCache {
+		tracks, found = cachedTracks[albumId]
+	}
 
-    if found == false {
-        stp, err := sa.spotifyAuth.Client.GetAlbumTracks(albumId)
-        log.PanicIf(err)
+	if found == false {
+		stp, err := sa.spotifyAuth.Client.GetAlbumTracks(albumId)
+		log.PanicIf(err)
 
-        tracks = make(map[string]spotify.ID)
-        for _, track := range stp.Tracks {
-            spotifyTrackName := invalidTrackCharsRx.ReplaceAllString(track.Name, "")
-            spotifyTrackName = spaceCharsRx.ReplaceAllString(spotifyTrackName, " ")
-            spotifyTrackName = strings.ToLower(spotifyTrackName)
+		tracks = make(map[string]spotify.ID)
+		for _, track := range stp.Tracks {
+			spotifyTrackName := invalidTrackCharsRx.ReplaceAllString(track.Name, "")
+			spotifyTrackName = spaceCharsRx.ReplaceAllString(spotifyTrackName, " ")
+			spotifyTrackName = strings.ToLower(spotifyTrackName)
 
-            tracks[spotifyTrackName] = track.ID
-        }
+			tracks[spotifyTrackName] = track.ID
+		}
 
-        if allowCache {
-            cachedTracks[albumId] = tracks
-        }
-    }
+		if allowCache {
+			cachedTracks[albumId] = tracks
+		}
+	}
 
-    ids = make([]spotify.ID, 0)
-    missing = make([]string, 0)
+	ids = make([]spotify.ID, 0)
+	missing = make([]string, 0)
 
-    for _, name := range names {
-        name = invalidTrackCharsRx.ReplaceAllString(name, "")
-        name = spaceCharsRx.ReplaceAllString(name, " ")
+	for _, name := range names {
+		name = invalidTrackCharsRx.ReplaceAllString(name, "")
+		name = spaceCharsRx.ReplaceAllString(name, " ")
 
-        if id, found := tracks[name]; found == true {
-            ids = append(ids, id)
-            sLog.Debugf(sa.ctx, "Found: [%s] [%s] => [%s]", albumId, name, id)
-        } else {
-            missing = append(missing, name)
-            sLog.Debugf(sa.ctx, "Track [%s] under album-ID [%s] not found.", name, albumId)
-        }
-    }
+		if id, found := tracks[name]; found == true {
+			ids = append(ids, id)
+			sLog.Debugf(sa.ctx, "Found: [%s] [%s] => [%s]", albumId, name, id)
+		} else {
+			missing = append(missing, name)
+			sLog.Debugf(sa.ctx, "Track [%s] under album-ID [%s] not found.", name, albumId)
+		}
+	}
 
-    if len(missing) > 0 && doPrintCandidates {
-        sLog.Debugf(sa.ctx, "(%d) tracks are available in album-ID [%s].", len(tracks), albumId)
+	if len(missing) > 0 && doPrintCandidates {
+		sLog.Debugf(sa.ctx, "(%d) tracks are available in album-ID [%s].", len(tracks), albumId)
 
-        i := 0
-        for thisName, _ := range tracks {
-            sLog.Debugf(sa.ctx, "Available track under album-ID [%s]: (%d) [%s]", albumId, i, thisName)
-        
-            i++
-        }
-    }
+		i := 0
+		for thisName, _ := range tracks {
+			sLog.Debugf(sa.ctx, "Available track under album-ID [%s]: (%d) [%s]", albumId, i, thisName)
 
-    return ids, missing, nil
+			i++
+		}
+	}
+
+	return ids, missing, nil
 }
 
 // getSpotifyTrackId Find and add the track to the Spotify playlist.
 func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doPrintCandidates bool) (id spotify.ID, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    name = invalidTrackCharsRx.ReplaceAllString(name, "")
-    name = spaceCharsRx.ReplaceAllString(name, " ")
+	name = invalidTrackCharsRx.ReplaceAllString(name, "")
+	name = spaceCharsRx.ReplaceAllString(name, " ")
 
-    found := false
-    var tracks map[string]spotify.ID
+	found := false
+	var tracks map[string]spotify.ID
 
-    if allowCache {
-        tracks, found = cachedTracks[albumId]
-    }
+	if allowCache {
+		tracks, found = cachedTracks[albumId]
+	}
 
-    if found == false {
-        stp, err := sa.spotifyAuth.Client.GetAlbumTracks(albumId)
-        log.PanicIf(err)
+	if found == false {
+		stp, err := sa.spotifyAuth.Client.GetAlbumTracks(albumId)
+		log.PanicIf(err)
 
-        tracks = make(map[string]spotify.ID)
-        for _, track := range stp.Tracks {
-            spotifyTrackName := invalidTrackCharsRx.ReplaceAllString(track.Name, "")
-            spotifyTrackName = spaceCharsRx.ReplaceAllString(spotifyTrackName, " ")
-            spotifyTrackName = strings.ToLower(spotifyTrackName)
+		tracks = make(map[string]spotify.ID)
+		for _, track := range stp.Tracks {
+			spotifyTrackName := invalidTrackCharsRx.ReplaceAllString(track.Name, "")
+			spotifyTrackName = spaceCharsRx.ReplaceAllString(spotifyTrackName, " ")
+			spotifyTrackName = strings.ToLower(spotifyTrackName)
 
-            tracks[spotifyTrackName] = track.ID
-        }
+			tracks[spotifyTrackName] = track.ID
+		}
 
-        if allowCache {
-            cachedTracks[albumId] = tracks
-        }
-    }
+		if allowCache {
+			cachedTracks[albumId] = tracks
+		}
+	}
 
-    for albumTrackName, id := range tracks {
-        if albumTrackName == name {
-            return id, nil
-        }
-    }
+	for albumTrackName, id := range tracks {
+		if albumTrackName == name {
+			return id, nil
+		}
+	}
 
-    sLog.Debugf(sa.ctx, "Track [%s] under album-ID [%s] not found.", name, albumId)
+	sLog.Debugf(sa.ctx, "Track [%s] under album-ID [%s] not found.", name, albumId)
 
-    if doPrintCandidates {
-        sLog.Debugf(sa.ctx, "(%d) tracks are available in album-ID [%s].", len(tracks), albumId)
+	if doPrintCandidates {
+		sLog.Debugf(sa.ctx, "(%d) tracks are available in album-ID [%s].", len(tracks), albumId)
 
-        i := 0
-        for thisName, _ := range tracks {
-            sLog.Debugf(sa.ctx, "Available track under album-ID [%s]: (%d) [%s]", albumId, i, thisName)
-        
-            i++
-        }
-    }
+		i := 0
+		for thisName, _ := range tracks {
+			sLog.Debugf(sa.ctx, "Available track under album-ID [%s]: (%d) [%s]", albumId, i, thisName)
 
-    log.Panic(ErrSpotifyTrackNotFound)
-    return spotify.ID(""), nil
+			i++
+		}
+	}
+
+	log.Panic(ErrSpotifyTrackNotFound)
+	return spotify.ID(""), nil
 }
 
 func (sa *SpotifyAdapter) GetSpotifyTrackIdsWithNames(artistName string, albumName string, tracks []string, marketName string) (foundTracks []spotify.ID, missingTracks []string, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    artistId, err := sa.getSpotifyArtistId(artistName)
-    log.PanicIf(err)
+	artistId, err := sa.getSpotifyArtistId(artistName)
+	log.PanicIf(err)
 
-    albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
-    if log.Is(err, ErrSpotifyAlbumNotFound) == true {
-        albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
-        log.PanicIf(err)
-    } else if err != nil {
-        log.Panic(err)
-    }
+	albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
+	if log.Is(err, ErrSpotifyAlbumNotFound) == true {
+		albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
+		log.PanicIf(err)
+	} else if err != nil {
+		log.Panic(err)
+	}
 
-    foundTracks, missingTracks, err = sa.getSpotifyTrackIds(albumId, tracks, true)
-    log.PanicIf(err)
+	foundTracks, missingTracks, err = sa.getSpotifyTrackIds(albumId, tracks, true)
+	log.PanicIf(err)
 
-    return foundTracks, missingTracks, nil
+	return foundTracks, missingTracks, nil
 }
 
 func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumName string, trackName string, marketName string) (spotifyTrackId spotify.ID, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    artistId, err := sa.getSpotifyArtistId(artistName)
-    log.PanicIf(err)
+	artistId, err := sa.getSpotifyArtistId(artistName)
+	log.PanicIf(err)
 
-    albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
-    if log.Is(err, ErrSpotifyAlbumNotFound) == true {
-        albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
-    } else if err != nil {
-        log.Panic(err)
-    }
+	albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
+	if log.Is(err, ErrSpotifyAlbumNotFound) == true {
+		albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
+	} else if err != nil {
+		log.Panic(err)
+	}
 
-    trackId, err := sa.getSpotifyTrackId(albumId, trackName, true)
-    log.PanicIf(err)
+	trackId, err := sa.getSpotifyTrackId(albumId, trackName, true)
+	log.PanicIf(err)
 
-    return trackId, nil
+	return trackId, nil
 }
 
 func (sa *SpotifyAdapter) ReadSpotifyPlaylist(playlistId spotify.ID, userId string) (tracks []spotify.ID, err error) {
-    defer func() {
-        if state := recover(); state != nil {
-            err = state.(error)
-        }
-    }()
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
 
-    sLog.Debugf(sa.ctx, "Reading Spotify playlist.")
+	sLog.Debugf(sa.ctx, "Reading Spotify playlist.")
 
-    ptp, err := sa.spotifyAuth.Client.GetPlaylistTracks(userId, playlistId)
-    log.PanicIf(err)
+	ptp, err := sa.spotifyAuth.Client.GetPlaylistTracks(userId, playlistId)
+	log.PanicIf(err)
 
-    tracks = make([]spotify.ID, len(ptp.Tracks))
-    for j, pt := range ptp.Tracks {
-        tracks[j] = pt.Track.ID
-    }
+	tracks = make([]spotify.ID, len(ptp.Tracks))
+	for j, pt := range ptp.Tracks {
+		tracks[j] = pt.Track.ID
+	}
 
-    return tracks, nil
+	return tracks, nil
 }
 
 func init() {
-    var err error
+	var err error
 
-    invalidTrackCharsRx, err = regexp.Compile("[^a-zA-Z0-9' ]+")
-    log.PanicIf(err)
+	invalidTrackCharsRx, err = regexp.Compile("[^a-zA-Z0-9' ]+")
+	log.PanicIf(err)
 
-    spaceCharsRx, err = regexp.Compile("[ ]+")
-    log.PanicIf(err)
+	spaceCharsRx, err = regexp.Compile("[ ]+")
+	log.PanicIf(err)
 }

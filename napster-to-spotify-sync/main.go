@@ -1,104 +1,129 @@
 package main
 
 import (
-    "os"
+	"fmt"
+	"os"
 
-    "golang.org/x/net/context"
-    "github.com/dsoprea/go-logging"
-    "github.com/jessevdk/go-flags"
+	"github.com/dsoprea/go-logging"
+	"github.com/jessevdk/go-flags"
+	"golang.org/x/net/context"
 
-    "github.com/dsoprea/go-napster-to-spotify-sync/internal/sync"
+	"github.com/dsoprea/go-napster-to-spotify-sync/internal/sync"
 )
 
 const (
-    SpotifyRedirectUrl = "http://localhost:8888/authResponse"
-    SpotifyAuthorizeLocalBindUrl = ":8888"
+	SpotifyRedirectUrl           = "http://localhost:8888/authResponse"
+	SpotifyAuthorizeLocalBindUrl = ":8888"
 )
 
 // Config
 var (
-    ImportBatchSize = 100
+	// napsterBatchSize is how many tracks to read and process from Napster at a
+	// time.
+	napsterBatchSize = 100
+
+	// spotifyBatchSize is how many tracks to add to the Spotify playlist at a
+	// time. Note that, as these are sent via URL query, too many will cauase
+	// the request to fail due to URL size.
+	spotifyBatchSize = 50
 )
 
 // Misc
 var (
-    mLog = log.NewLogger("main")
+	mLog = log.NewLogger("main")
 )
 
 type options struct {
-    SpotifyApiClientId string `long:"spotify-api-client-id" required:"true" description:"Spotify API client-ID"`
-    SpotifyApiSecretKey string `long:"spotify-api-secret-key" required:"true" description:"Spotify API secret key"`
+	SpotifyApiClientId  string `long:"spotify-api-client-id" required:"true" description:"Spotify API client-ID"`
+	SpotifyApiSecretKey string `long:"spotify-api-secret-key" required:"true" description:"Spotify API secret key"`
 
-    NapsterApiKey string `long:"napster-api-key" required:"true" description:"Napster API key"`
-    NapsterSecretKey string `long:"napster-secret-key" required:"true" description:"Napster secret key"`
+	NapsterApiKey    string `long:"napster-api-key" required:"true" description:"Napster API key"`
+	NapsterSecretKey string `long:"napster-secret-key" required:"true" description:"Napster secret key"`
 
-    NapsterUsername string `long:"napster-username" required:"true" description:"Napster username"`
-    NapsterPassword string `long:"napster-password" required:"true" description:"Napster password"`
+	NapsterUsername string `long:"napster-username" required:"true" description:"Napster username"`
+	NapsterPassword string `long:"napster-password" required:"true" description:"Napster password"`
 
-    SpotifyPlaylistName string  `short:"p" long:"playlist-name" required:"true" description:"Spotify playlist name"`
-    OnlyArtists []string        `short:"a" long:"only-artists" required:"true" description:"One artist to import"`
+	SpotifyPlaylistName string   `short:"p" long:"playlist-name" required:"true" description:"Spotify playlist name"`
+	OnlyArtists         []string `short:"a" long:"only-artists" required:"true" description:"One artist to import"`
 
-    NoChanges bool `short:"n" long:"no-changes" description:"Do not make changes to Spotify"`
+	NoChanges bool `short:"n" long:"no-changes" description:"Do not make changes to Spotify"`
 
-    SpotifyAlbumMarket string `short:"m" long:"spotify-album-market" description:"Name of music market (two-letter country code) to filter Spotify albums by"`
+	SpotifyAlbumMarket string `short:"m" long:"spotify-album-market" description:"Name of music market (two-letter country code) to filter Spotify albums by"`
 }
 
 func main() {
-    ecp := log.NewEnvironmentConfigurationProvider()
-    log.LoadConfiguration(ecp)
+	defer func() {
+		if state := recover(); state != nil {
+			mLog.Errorf(nil, state.(error), "There was an error.")
+		}
+	}()
 
-    cla := log.NewConsoleLogAdapter()
-    log.AddAdapter("console", cla)
+	ecp := log.NewEnvironmentConfigurationProvider()
+	log.LoadConfiguration(ecp)
 
-    log.AddExcludeFilter("napster.client")
-    log.AddExcludeFilter("napster.authorization")
+	cla := log.NewConsoleLogAdapter()
+	log.AddAdapter("console", cla)
 
-    o := new(options)
-    if _, err := flags.Parse(o); err != nil {
-        os.Exit(1)
-    }
+	log.AddExcludeFilter("napster.client")
+	log.AddExcludeFilter("napster.authorization")
 
-    ctx := context.Background()
-    authC := make(chan *gnsssync.SpotifyContext)
+	o := new(options)
+	if _, err := flags.Parse(o); err != nil {
+		os.Exit(1)
+	}
 
-    go func() {
-        sa := gnsssync.NewSpotifyAuthorizer(ctx, o.SpotifyApiClientId, o.SpotifyApiSecretKey, SpotifyRedirectUrl, SpotifyAuthorizeLocalBindUrl, authC)
-        if err := sa.Authorize(); err != nil {
-            log.Panic(err)
-        }
+	ctx := context.Background()
+	authC := make(chan *gnsssync.SpotifyContext)
 
-        // Somehow the HTTP handler doesn't hold the application open and we'll 
-        // terminate at the end as would be desired.
-    }()
+	go func() {
+		sa := gnsssync.NewSpotifyAuthorizer(ctx, o.SpotifyApiClientId, o.SpotifyApiSecretKey, SpotifyRedirectUrl, SpotifyAuthorizeLocalBindUrl, authC)
+		if err := sa.Authorize(); err != nil {
+			log.Panic(err)
+		}
 
-    spotifyAuth := <-authC
+		// Somehow the HTTP handler doesn't hold the application open and we'll
+		// terminate at the end as would be desired.
+	}()
 
-    mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
+	spotifyAuth := <-authC
 
-    sc := gnsssync.NewSpotifyCache(ctx, spotifyAuth)
-    i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, sc, ImportBatchSize, o.SpotifyAlbumMarket)
+	spotifyAuth.Client.SetAutoRetry(true)
 
-    idList, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists)
-    log.PanicIf(err)
+	mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
 
-    len_ := len(idList)
-    if len_ == 0 {
-        mLog.Warningf(ctx, "No tracks found to import.")
-    } else if o.NoChanges == true {
-        mLog.Warningf(ctx, "There were changes to make but we were told to not make them.")
-    } else {
-        mLog.Infof(ctx, "Adding tracks to the playlist.")
+	sc := gnsssync.NewSpotifyCache(ctx, spotifyAuth)
+	i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, sc, napsterBatchSize, o.SpotifyAlbumMarket)
 
-        spotifyUserId, err := sc.GetSpotifyCurrentUserId()
-        log.PanicIf(err)
+	idList, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists)
+	log.PanicIf(err)
 
-        spotifyPlaylistId, err := sc.GetSpotifyPlaylistId(spotifyUserId, o.SpotifyPlaylistName)
-        log.PanicIf(err)
+	len_ := len(idList)
+	if len_ == 0 {
+		mLog.Warningf(ctx, "No tracks found to import.")
+	} else if o.NoChanges == true {
+		mLog.Warningf(ctx, "There were changes to make but we were told to not make them.")
+	} else {
+		mLog.Infof(ctx, "Adding tracks to the playlist.")
 
-        mLog.Infof(ctx, "Adding (%d) tracks.", len_)
+		spotifyUserId, err := sc.GetSpotifyCurrentUserId()
+		log.PanicIf(err)
 
-        if _, err := spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, idList...); err != nil {
-            log.Panic(err)
-        }
-    }
+		spotifyPlaylistId, err := sc.GetSpotifyPlaylistId(spotifyUserId, o.SpotifyPlaylistName)
+		log.PanicIf(err)
+
+		for offset := 0; offset < len_; offset += spotifyBatchSize {
+			batchLen := spotifyBatchSize
+			if offset+spotifyBatchSize >= len_ {
+				batchLen = len_ - offset
+			}
+
+			mLog.Infof(ctx, "Adding (%d) tracks from offset (%d).", batchLen, offset)
+
+			batchIdList := idList[offset : offset+batchLen]
+
+			if _, err := spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, batchIdList...); err != nil {
+				log.Panic(err)
+			}
+		}
+	}
 }
