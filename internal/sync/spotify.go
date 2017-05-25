@@ -194,6 +194,98 @@ func (sa *SpotifyAdapter) getSpotifyArtistId(name string) (id spotify.ID, err er
 	return spotify.ID(""), nil
 }
 
+// removeSuffixClause removes something like "(xyz)" at the very right side of
+// the given string.
+func (sa *SpotifyAdapter) removeSuffixClause(arg, leftDelimiter, rightDelimiter string) (distilled string) {
+	distilled = strings.TrimSpace(arg)
+	if distilled[:len(distilled)-1] != rightDelimiter {
+		return
+	}
+
+	i := strings.LastIndex(distilled, leftDelimiter)
+
+	if i == -1 {
+		return distilled
+	}
+
+	sLog.Debugf(nil, "Stripping expressions: [%s]", distilled)
+
+	i--
+
+	for i > 0 && string(distilled[i]) == " " {
+		i--
+	}
+
+	distilled = distilled[:i+1]
+	return distilled
+}
+
+func (sa *SpotifyAdapter) normalizeTitle(arg string) (distilled string) {
+	distilled = arg
+
+	distilled = invalidTrackCharsRx.ReplaceAllString(distilled, "")
+	distilled = spaceCharsRx.ReplaceAllString(distilled, " ")
+	distilled = strings.ToLower(distilled)
+
+	return distilled
+}
+
+func (sa *SpotifyAdapter) simplifyTitle(arg string) (distilled string) {
+	distilled = arg
+
+	distilled = sa.removeSuffixClause(distilled, "(", ")")
+	distilled = sa.removeSuffixClause(distilled, "[", "]")
+
+	return distilled
+}
+
+func (sa *SpotifyAdapter) isEqual(typeName, arg1, arg2 string, doLiberalSearch bool) (isEqual bool, err error) {
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
+
+	// Preprocess the strings.
+
+	arg1 = strings.TrimSpace(arg1)
+	arg1 = strings.ToLower(arg1)
+
+	arg2 = strings.TrimSpace(arg2)
+	arg2 = strings.ToLower(arg2)
+
+	if doLiberalSearch {
+		// Remove subexpressions that may indicate that this album is a
+		// variation or alternate production rather than the original.
+
+		arg1 = sa.simplifyTitle(arg1)
+		arg2 = sa.simplifyTitle(arg2)
+
+		if arg1 == arg2 {
+			return true, nil
+		}
+	} else {
+		// Do a direct string-comparison.
+
+		if arg1 == arg2 {
+			return true, nil
+		}
+
+		// Remove symbols and extra spacing (some systems might use parantheses
+		// and others might use square brackets; they will be equal after
+		// this).
+
+		arg1 = sa.normalizeTitle(arg1)
+		arg2 = sa.normalizeTitle(arg2)
+
+		if arg1 == arg2 {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // getSpotifyAlbumId returns a matching Spotify album ID. `doLiberalSearch` can
 // be used to find the first match after modifying the list of fetched albums
 // to exclude paranthetical expressions at the end of the album names (e.g.
@@ -252,34 +344,16 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
 		}
 
 		for _, a := range sp.Albums {
-			if a.AlbumType != "album" {
-				continue
-			}
+			searchableName := strings.ToLower(a.Name)
 
-			thisName := strings.ToLower(a.Name)
-			distilledAvailable = append(distilledAvailable, a.Name)
+			albumDescription := fmt.Sprintf("%s (%s)", a.Name, a.AlbumType)
+			distilledAvailable = append(distilledAvailable, albumDescription)
 
-			searchableName := thisName
+			matched, err := sa.isEqual("album", searchableName, name, doLiberalSearch)
+			log.PanicIf(err)
 
-			if doLiberalSearch {
-				// TODO(dustin): Cache this.
-				i := strings.LastIndex(searchableName, "(")
-
-				if i > -1 {
-					sLog.Debugf(nil, "Stripping any paranthetical expressions from album name: [%s]", searchableName)
-
-					i--
-
-					for i > 0 && string(searchableName[i]) == " " {
-						i--
-					}
-
-					searchableName = searchableName[:i+1]
-				}
-			}
-
-			if searchableName == name {
-				sLog.Debugf(sa.ctx, "Found ID for album under artist-ID [%s]: [%s] found as [%s]", artistId, name, thisName)
+			if matched == true {
+				sLog.Debugf(sa.ctx, "Found ID for album under artist-ID [%s]: [%s] found as [%s]", artistId, name, searchableName)
 
 				if albumAllowCache {
 					cachedAlbums[cak] = a.ID
@@ -327,10 +401,7 @@ func (sa *SpotifyAdapter) getSpotifyTrackIds(albumId spotify.ID, names []string,
 
 		tracks = make(map[string]spotify.ID)
 		for _, track := range stp.Tracks {
-			spotifyTrackName := invalidTrackCharsRx.ReplaceAllString(track.Name, "")
-			spotifyTrackName = spaceCharsRx.ReplaceAllString(spotifyTrackName, " ")
-			spotifyTrackName = strings.ToLower(spotifyTrackName)
-
+			spotifyTrackName := sa.normalizeTitle(track.Name)
 			tracks[spotifyTrackName] = track.ID
 		}
 
@@ -343,8 +414,7 @@ func (sa *SpotifyAdapter) getSpotifyTrackIds(albumId spotify.ID, names []string,
 	missing = make([]string, 0)
 
 	for _, name := range names {
-		name = invalidTrackCharsRx.ReplaceAllString(name, "")
-		name = spaceCharsRx.ReplaceAllString(name, " ")
+		name = sa.normalizeTitle(name)
 
 		if id, found := tracks[name]; found == true {
 			ids = append(ids, id)
@@ -377,8 +447,7 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doP
 		}
 	}()
 
-	name = invalidTrackCharsRx.ReplaceAllString(name, "")
-	name = spaceCharsRx.ReplaceAllString(name, " ")
+	name = sa.normalizeTitle(name)
 
 	found := false
 	var tracks map[string]spotify.ID
@@ -393,10 +462,7 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doP
 
 		tracks = make(map[string]spotify.ID)
 		for _, track := range stp.Tracks {
-			spotifyTrackName := invalidTrackCharsRx.ReplaceAllString(track.Name, "")
-			spotifyTrackName = spaceCharsRx.ReplaceAllString(spotifyTrackName, " ")
-			spotifyTrackName = strings.ToLower(spotifyTrackName)
-
+			spotifyTrackName := sa.normalizeTitle(track.Name)
 			tracks[spotifyTrackName] = track.ID
 		}
 
@@ -438,8 +504,10 @@ func (sa *SpotifyAdapter) GetSpotifyTrackIdsWithNames(artistName string, albumNa
 	artistId, err := sa.getSpotifyArtistId(artistName)
 	log.PanicIf(err)
 
+	// Do a strict string search to find the album among the candidates.
 	albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
 	if log.Is(err, ErrSpotifyAlbumNotFound) == true {
+		// Do a fuzzier search to find the album among the candidates.
 		albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
 		log.PanicIf(err)
 	} else if err != nil {
@@ -498,7 +566,7 @@ func (sa *SpotifyAdapter) ReadSpotifyPlaylist(playlistId spotify.ID, userId stri
 func init() {
 	var err error
 
-	invalidTrackCharsRx, err = regexp.Compile("[^a-zA-Z0-9' ]+")
+	invalidTrackCharsRx, err = regexp.Compile("[^a-zA-Z0-9']+")
 	log.PanicIf(err)
 
 	spaceCharsRx, err = regexp.Compile("[ ]+")

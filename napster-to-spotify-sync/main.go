@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/dsoprea/go-logging"
@@ -87,7 +86,7 @@ func main() {
 
 	spotifyAuth := <-authC
 
-	spotifyAuth.Client.SetAutoRetry(true)
+	spotifyAuth.Client.AutoRetry = true
 
 	mLog.Debugf(nil, "Received auth-code. Proceeding with import.")
 
