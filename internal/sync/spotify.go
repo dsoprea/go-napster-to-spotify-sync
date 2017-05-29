@@ -13,7 +13,7 @@ import (
 
 // Config
 const (
-	SpotifyAlbumReadBatchSize = 50
+	SpotifyReadBatchSize = 50
 )
 
 // Errors
@@ -319,7 +319,7 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
 	}
 
 	offset := 0
-	limit := SpotifyAlbumReadBatchSize
+	limit := SpotifyReadBatchSize
 
 	// Filter by market (otherwise we'll see a lot of duplicates, some of which
 	// won't be relevant).
@@ -339,7 +339,8 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
 		sp, err := sa.spotifyAuth.Client.GetArtistAlbumsOpt(artistId, o, &ata)
 		log.PanicIf(err)
 
-		if len(sp.Albums) == 0 {
+		len_ := len(sp.Albums)
+		if len_ == 0 {
 			break
 		}
 
@@ -363,7 +364,7 @@ func (sa *SpotifyAdapter) getSpotifyAlbumId(artistId spotify.ID, name string, ma
 			}
 		}
 
-		offset := *o.Offset + SpotifyAlbumReadBatchSize
+		offset := *o.Offset + len_
 		o.Offset = &offset
 	}
 
@@ -543,7 +544,7 @@ func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumNam
 	return trackId, nil
 }
 
-func (sa *SpotifyAdapter) ReadSpotifyPlaylist(playlistId spotify.ID, userId string) (tracks []spotify.ID, err error) {
+func (sa *SpotifyAdapter) ReadSpotifyPlaylist(playlistId spotify.ID, userId string, marketName string) (tracks []spotify.ID, err error) {
 	defer func() {
 		if state := recover(); state != nil {
 			err = log.Wrap(state.(error))
@@ -552,12 +553,38 @@ func (sa *SpotifyAdapter) ReadSpotifyPlaylist(playlistId spotify.ID, userId stri
 
 	sLog.Debugf(sa.ctx, "Reading Spotify playlist.")
 
-	ptp, err := sa.spotifyAuth.Client.GetPlaylistTracks(userId, playlistId)
-	log.PanicIf(err)
+	// TODO(dustin): !! Finish refactoring to read all songs by batches.
 
-	tracks = make([]spotify.ID, len(ptp.Tracks))
-	for j, pt := range ptp.Tracks {
-		tracks[j] = pt.Track.ID
+	offset := 0
+	limit := SpotifyReadBatchSize
+
+	// Filter by market (otherwise we'll see a lot of duplicates, some of which
+	// won't be relevant).
+	o := &spotify.Options{
+		Offset: &offset,
+		Limit:  &limit,
+	}
+
+	if marketName != "" {
+		o.Country = &marketName
+	}
+
+	tracks = make([]spotify.ID, 0)
+
+	for {
+		ptp, err := sa.spotifyAuth.Client.GetPlaylistTracksOpt(userId, playlistId, o, "")
+		log.PanicIf(err)
+
+		if len(ptp.Tracks) == 0 {
+			break
+		}
+
+		for _, pt := range ptp.Tracks {
+			tracks = append(tracks, pt.Track.ID)
+		}
+
+		offset := *o.Offset + len(ptp.Tracks)
+		o.Offset = &offset
 	}
 
 	return tracks, nil

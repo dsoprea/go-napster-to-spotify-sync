@@ -93,7 +93,7 @@ func main() {
 	sc := gnsssync.NewSpotifyCache(ctx, spotifyAuth)
 	i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, sc, napsterBatchSize, o.SpotifyAlbumMarket)
 
-	idList, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists)
+	idList, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists, o.SpotifyAlbumMarket)
 	log.PanicIf(err)
 
 	len_ := len(idList)
@@ -116,9 +116,14 @@ func main() {
 				batchLen = len_ - offset
 			}
 
-			mLog.Infof(ctx, "Adding (%d) tracks from offset (%d).", batchLen, offset)
+			mLog.Infof(ctx, "Adding (%d) track(s) from offset (%d).", batchLen, offset)
 
 			batchIdList := idList[offset : offset+batchLen]
+
+			// TODO(dustin): Debugging.
+			for i, id := range batchIdList {
+				mLog.Debugf(ctx, "ADDING: (%d) [%s]", i, id)
+			}
 
 			if _, err := spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, batchIdList...); err != nil {
 				log.Panic(err)

@@ -270,16 +270,18 @@ func (i *Importer) buildSpotifyIndex(tracks []spotify.ID) (err error) {
 		}
 	}()
 
-	iLog.Debugf(i.ctx, "Building index with existing songs.")
+	iLog.Debugf(i.ctx, "Building index with (%d) existing songs.", len(tracks))
 
 	for _, id := range tracks {
+		// TODO(dustin): Debugging.
+		iLog.Debugf(i.ctx, "EXISTING SONG: [%s]", id)
 		i.spotifyIndex[id] = true
 	}
 
 	return nil
 }
 
-func (i *Importer) preloadExisting(spotifyPlaylistName string) (err error) {
+func (i *Importer) preloadExisting(spotifyPlaylistName, spotifyMarketName string) (err error) {
 	defer func() {
 		if state := recover(); state != nil {
 			err = log.Wrap(state.(error))
@@ -292,7 +294,7 @@ func (i *Importer) preloadExisting(spotifyPlaylistName string) (err error) {
 	spotifyPlaylistId, err := i.sc.GetSpotifyPlaylistId(spotifyUserId, spotifyPlaylistName)
 	log.PanicIf(err)
 
-	spotifyTracks, err := i.sa.ReadSpotifyPlaylist(spotifyPlaylistId, spotifyUserId)
+	spotifyTracks, err := i.sa.ReadSpotifyPlaylist(spotifyPlaylistId, spotifyUserId, spotifyMarketName)
 	log.PanicIf(err)
 
 	err = i.buildSpotifyIndex(spotifyTracks)
@@ -307,7 +309,7 @@ type trackCollector struct {
 	idList []spotify.ID
 }
 
-func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []string) (tracks []spotify.ID, err error) {
+func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []string, spotifyMarketName string) (tracks []spotify.ID, err error) {
 	defer func() {
 		if state := recover(); state != nil {
 			err = log.Wrap(state.(error))
@@ -319,7 +321,7 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
 		onlyArtists[i] = strings.ToLower(a)
 	}
 
-	if err := i.preloadExisting(spotifyPlaylistName); err != nil {
+	if err := i.preloadExisting(spotifyPlaylistName, spotifyMarketName); err != nil {
 		log.Panic(err)
 	}
 
