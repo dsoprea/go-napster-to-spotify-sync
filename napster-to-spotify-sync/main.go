@@ -5,6 +5,7 @@ import (
 
 	"github.com/dsoprea/go-logging"
 	"github.com/jessevdk/go-flags"
+	"github.com/zmb3/spotify"
 	"golang.org/x/net/context"
 
 	"github.com/dsoprea/go-napster-to-spotify-sync/internal/sync"
@@ -93,10 +94,10 @@ func main() {
 	sc := gnsssync.NewSpotifyCache(ctx, spotifyAuth)
 	i := gnsssync.NewImporter(ctx, o.NapsterApiKey, o.NapsterSecretKey, o.NapsterUsername, o.NapsterPassword, spotifyAuth, sc, napsterBatchSize, o.SpotifyAlbumMarket)
 
-	idList, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists, o.SpotifyAlbumMarket)
+	ids, err := i.GetTracksToAdd(o.SpotifyPlaylistName, o.OnlyArtists, o.SpotifyAlbumMarket)
 	log.PanicIf(err)
 
-	len_ := len(idList)
+	len_ := len(ids)
 	if len_ == 0 {
 		mLog.Warningf(ctx, "No tracks found to import.")
 	} else if o.NoChanges == true {
@@ -110,22 +111,39 @@ func main() {
 		spotifyPlaylistId, err := sc.GetSpotifyPlaylistId(spotifyUserId, o.SpotifyPlaylistName)
 		log.PanicIf(err)
 
-		for offset := 0; offset < len_; offset += spotifyBatchSize {
-			batchLen := spotifyBatchSize
-			if offset+spotifyBatchSize >= len_ {
-				batchLen = len_ - offset
+		flushCb := func(idList []spotify.ID) (err error) {
+			defer func() {
+				if state := recover(); state != nil {
+					err = log.Wrap(state.(error))
+				}
+			}()
+
+			if _, err := spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, idList...); err != nil {
+				log.Panic(err)
 			}
 
-			mLog.Infof(ctx, "Adding (%d) track(s) from offset (%d).", batchLen, offset)
+			return nil
+		}
 
-			batchIdList := idList[offset : offset+batchLen]
+		batchIdList := make([]spotify.ID, spotifyBatchSize)
+		j := 0
+		for id, trackInfo := range ids {
+			batchIdList[j] = id
+			j++
 
-			// TODO(dustin): Debugging.
-			for i, id := range batchIdList {
-				mLog.Debugf(ctx, "ADDING: (%d) [%s]", i, id)
+			mLog.Debugf(ctx, "ADDING: [%s] %s", id, trackInfo)
+
+			if j >= spotifyBatchSize {
+				if err := flushCb(batchIdList); err != nil {
+					log.Panic(err)
+				}
+
+				j = 0
 			}
+		}
 
-			if _, err := spotifyAuth.Client.AddTracksToPlaylist(spotifyUserId, spotifyPlaylistId, batchIdList...); err != nil {
+		if j > 0 {
+			if err := flushCb(batchIdList[:j]); err != nil {
 				log.Panic(err)
 			}
 		}

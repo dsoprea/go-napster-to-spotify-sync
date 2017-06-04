@@ -24,6 +24,16 @@ type albumKeyNames struct {
 	albumName  string
 }
 
+type TrackInfo struct {
+	ArtistName string
+	AlbumName  string
+	TitleName  string
+}
+
+func (ti TrackInfo) String() string {
+	return fmt.Sprintf("TRACK<[%s] [%s] [%s]>", ti.ArtistName, ti.AlbumName, ti.TitleName)
+}
+
 type Importer struct {
 	ctx context.Context
 	hc  *http.Client
@@ -38,7 +48,6 @@ type Importer struct {
 	sa          *SpotifyAdapter
 
 	batchSize int
-	offset    int
 
 	spotifyIndex  map[spotify.ID]bool
 	artistNotices map[string]bool
@@ -70,7 +79,6 @@ func NewImporter(ctx context.Context, napsterApiKey, napsterSecretKey, napsterUs
 		sa:          sa,
 
 		batchSize: batchSize,
-		offset:    0,
 
 		spotifyIndex:  spotifyIndex,
 		artistNotices: artistNotices,
@@ -101,7 +109,88 @@ func (i *Importer) getNapsterNormalizedTrack(track *napster.MetadataTrackDetail)
 	}
 }
 
-func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtists []string, collector *trackCollector, missing []string) (count int, skipped int, missingUpdated []string, err error) {
+func (i *Importer) readNapsterFavorites(amc *napster.AuthenticatedMemberClient, onlyArtists []string) (groupedTracks map[albumKeyNames][]string, skipped int, err error) {
+	defer func() {
+		if state := recover(); state != nil {
+			err = log.Wrap(state.(error))
+		}
+	}()
+
+	mc := napster.NewMetadataClient(i.ctx, i.hc, i.napsterApiKey)
+
+	groupedTracks = make(map[albumKeyNames][]string)
+	j := 0
+	for {
+		favorites, err := amc.GetFavoriteTracks(j, i.batchSize)
+		log.PanicIf(err)
+
+		favoritesLen := len(favorites)
+		if favoritesLen == 0 {
+			break
+		}
+
+		iLog.Debugf(i.ctx, "(%d) favorite tracks received starting at index (%d).", favoritesLen, j)
+
+		j += favoritesLen
+
+		ids := make([]string, favoritesLen)
+		for i, info := range favorites {
+			ids[i] = info.Id
+		}
+
+		tracks, err := mc.GetTrackDetail(ids...)
+		log.PanicIf(err)
+
+		for _, track := range tracks {
+			// We're going to check a couple of different things and be
+			// discriminating in what we print. This should allow us to
+			// efficiently cherry-pick artists, maybe even one at a time, to
+			// add to the playlist.
+
+			nt := i.getNapsterNormalizedTrack(&track)
+
+			// One of the artists on the track must be in the `onlyArtists`
+			// list. If track is *not* in Spotify and not in the `onlyArtists`
+			// list, skip and print.
+			//
+			// Our complexity is higher because each track is associated with
+			// potentially more than one artist.
+
+			found := false
+			for _, anAllowed := range onlyArtists {
+				if anAllowed == nt.ArtistName {
+					found = true
+					break
+				}
+			}
+
+			if found == false {
+				skipped++
+
+				i.artistNotices[nt.ArtistName] = true
+
+				continue
+			}
+
+			// Added.
+
+			akn := albumKeyNames{
+				artistName: nt.ArtistName,
+				albumName:  nt.AlbumName,
+			}
+
+			if groupedTracksList, found := groupedTracks[akn]; found == true {
+				groupedTracks[akn] = append(groupedTracksList, nt.TrackName)
+			} else {
+				groupedTracks[akn] = []string{nt.TrackName}
+			}
+		}
+	}
+
+	return groupedTracks, skipped, nil
+}
+
+func (i *Importer) importFavorites(amc *napster.AuthenticatedMemberClient, onlyArtists []string, collector *trackCollector, missing []string) (count int, skipped int, missingUpdated []string, err error) {
 	defer func() {
 		if state := recover(); state != nil {
 			err = log.Wrap(state.(error))
@@ -112,81 +201,18 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
 		log.Panic(fmt.Errorf("at least one artist must be given to import"))
 	}
 
-	fmt.Printf("READING FAVORITES: (%d) (%d)\n", i.offset, i.batchSize)
-
-	favorites, err := amc.GetFavoriteTracks(i.offset, i.batchSize)
+	groupedTracks, skipped, err := i.readNapsterFavorites(amc, onlyArtists)
 	log.PanicIf(err)
 
-	favoritesLen := len(favorites)
-	if favoritesLen == 0 {
+	if len(groupedTracks) == 0 {
 		return 0, 0, nil, nil
 	}
-
-	iLog.Debugf(i.ctx, "(%d) tracks received starting at index (%d).", favoritesLen, i.offset)
-
-	i.offset += favoritesLen
-
-	mc := napster.NewMetadataClient(i.ctx, i.hc, i.napsterApiKey)
-
-	ids := make([]string, favoritesLen)
-	for i, info := range favorites {
-		ids[i] = info.Id
-	}
-
-	tracks, err := mc.GetTrackDetail(ids...)
-	log.PanicIf(err)
 
 	missingArtists := make(map[string]bool)
 	missingAlbums := make(map[albumKeyNames]bool)
 
-	groupedTracks := make(map[albumKeyNames][]string)
-	for _, track := range tracks {
-		// We're going to check a couple of different things and be
-		// discriminating in what we print. This should allow us to
-		// efficiently cherry-pick artists, maybe even one at a time, to
-		// add to the playlist.
-
-		nt := i.getNapsterNormalizedTrack(&track)
-
-		akn := albumKeyNames{
-			artistName: nt.ArtistName,
-			albumName:  nt.AlbumName,
-		}
-
-		if groupedTracksList, found := groupedTracks[akn]; found == true {
-			groupedTracks[akn] = append(groupedTracksList, nt.TrackName)
-		} else {
-			groupedTracks[akn] = []string{nt.TrackName}
-		}
-	}
-
 	added := 0
 	for akn, tracks := range groupedTracks {
-		iLog.Debugf(nil, "Searching for tracks within: [%s] [%s]", akn.artistName, akn.albumName)
-
-		// One of the artists on the track must be in the `onlyArtists`
-		// list. If track is *not* in Spotify and not in the `onlyArtists`
-		// list, skip and print.
-		//
-		// Our complexity is higher because each track is associated with
-		// potentially more than one artist.
-
-		found := false
-		for _, anAllowed := range onlyArtists {
-			if anAllowed == akn.artistName {
-				found = true
-				break
-			}
-		}
-
-		if found == false {
-			skipped++
-
-			i.artistNotices[akn.artistName] = true
-
-			continue
-		}
-
 		// If track is not in Spotify and *in* the list, print and add.
 		//
 		// Note that this struct will only have exactly one artist (Napster only returns one).
@@ -209,7 +235,7 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
 		spotifyTrackIds, missingTrackNames, err := i.sa.GetSpotifyTrackIdsWithNames(akn.artistName, akn.albumName, tracks, i.marketName)
 		if log.Is(err, ErrSpotifyArtistNotFound) == true {
 			if _, found := missingArtists[akn.artistName]; found == false {
-				missing = append(missing, akn.artistName)
+				missing = append(missing, artistPhrase)
 				missingArtists[akn.artistName] = true
 
 				iLog.Warningf(i.ctx, "ARTIST NOT FOUND IN SPOTIFY: %s", artistPhrase)
@@ -245,14 +271,18 @@ func (i *Importer) importBatch(amc *napster.AuthenticatedMemberClient, onlyArtis
 
 		// If track is already in Spotify, don't do or print anything.
 
-		for _, spotifyTrackId := range spotifyTrackIds {
+		for spotifyTrackId, name := range spotifyTrackIds {
 			if _, found := i.spotifyIndex[spotifyTrackId]; found == true {
 				iLog.Infof(nil, "Track already in playlist: [%s]", spotifyTrackId)
 				continue
 			}
 
-			iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s]", akn.artistName, akn.albumName, spotifyTrackId)
-			collector.idList = append(collector.idList, spotifyTrackId)
+			iLog.Infof(i.ctx, "WILL ADD: [%s] [%s] [%s] -> [%s]", akn.artistName, akn.albumName, name, spotifyTrackId)
+			collector.ids[spotifyTrackId] = TrackInfo{
+				ArtistName: akn.artistName,
+				AlbumName:  akn.albumName,
+				TitleName:  name,
+			}
 
 			added++
 		}
@@ -273,8 +303,6 @@ func (i *Importer) buildSpotifyIndex(tracks []spotify.ID) (err error) {
 	iLog.Debugf(i.ctx, "Building index with (%d) existing songs.", len(tracks))
 
 	for _, id := range tracks {
-		// TODO(dustin): Debugging.
-		iLog.Debugf(i.ctx, "EXISTING SONG: [%s]", id)
 		i.spotifyIndex[id] = true
 	}
 
@@ -306,10 +334,10 @@ func (i *Importer) preloadExisting(spotifyPlaylistName, spotifyMarketName string
 // trackCollector Keeps track of the tracks that need to be added. We're going
 // to minimize our requests.
 type trackCollector struct {
-	idList []spotify.ID
+	ids map[spotify.ID]TrackInfo
 }
 
-func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []string, spotifyMarketName string) (tracks []spotify.ID, err error) {
+func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []string, spotifyMarketName string) (tracks map[spotify.ID]TrackInfo, err error) {
 	defer func() {
 		if state := recover(); state != nil {
 			err = log.Wrap(state.(error))
@@ -331,30 +359,14 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
 	a.SetUserCredentials(i.napsterUsername, i.napsterPassword)
 
 	collector := new(trackCollector)
+	collector.ids = make(map[spotify.ID]TrackInfo)
+
 	amc := napster.NewAuthenticatedMemberClient(i.ctx, i.hc, a)
 
-	skipped := 0
 	missing := make([]string, 0)
 
-	j := 0
-
-	for {
-		iLog.Debugf(nil, "Resolving batch (%d).", j+1)
-
-		added, currentSkipped, missingUpdated, err := i.importBatch(amc, onlyArtists, collector, missing)
-		log.PanicIf(err)
-
-		missing = missingUpdated
-		skipped += currentSkipped
-
-		if added == 0 {
-			break
-		}
-
-		j++
-	}
-
-	iLog.Debugf(nil, "Resolution finished after (%d) batches.", j)
+	_, skipped, missing, err := i.importFavorites(amc, onlyArtists, collector, missing)
+	log.PanicIf(err)
 
 	if len(i.artistNotices) > 0 {
 		ignoredArtists := make([]string, len(i.artistNotices))
@@ -373,7 +385,7 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
 		}
 	}
 
-	len_ := len(collector.idList)
+	len_ := len(collector.ids)
 
 	iLog.Infof(i.ctx, "(%d) tracks found to import.", len_)
 	iLog.Infof(i.ctx, "(%d) tracks skipped.", skipped)
@@ -382,5 +394,5 @@ func (i *Importer) GetTracksToAdd(spotifyPlaylistName string, onlyArtists []stri
 		iLog.Infof(i.ctx, "NOT FOUND: (%d) %s", j, missingPhrase)
 	}
 
-	return collector.idList, nil
+	return collector.ids, nil
 }
