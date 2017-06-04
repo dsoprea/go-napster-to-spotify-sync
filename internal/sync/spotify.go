@@ -197,7 +197,7 @@ func (sa *SpotifyAdapter) searchSpotifyArtists(name string) (ids []spotify.ID, e
 // the given string.
 func (sa *SpotifyAdapter) removeSuffixClause(arg, leftDelimiter, rightDelimiter string) (distilled string) {
 	distilled = strings.TrimSpace(arg)
-	if distilled[:len(distilled)-1] != rightDelimiter {
+	if distilled[len(distilled)-1:] != rightDelimiter {
 		return
 	}
 
@@ -215,15 +215,17 @@ func (sa *SpotifyAdapter) removeSuffixClause(arg, leftDelimiter, rightDelimiter 
 		i--
 	}
 
-	distilled = distilled[:i+1]
+	distilled = strings.TrimRight(distilled[:i+1], " ")
 	return distilled
 }
 
 func (sa *SpotifyAdapter) normalizeTitle(arg string) (distilled string) {
 	distilled = arg
 
+	// TODO(dustin): Flatten contractions. Yes, we've seen this being different because providers.
+
 	distilled = invalidTrackCharsRx.ReplaceAllString(distilled, " ")
-	distilled = spaceCharsRx.ReplaceAllString(distilled, " ")
+	distilled = strings.Trim(spaceCharsRx.ReplaceAllString(distilled, " "), " ")
 	distilled = strings.ToLower(distilled)
 
 	return distilled
@@ -232,10 +234,19 @@ func (sa *SpotifyAdapter) normalizeTitle(arg string) (distilled string) {
 func (sa *SpotifyAdapter) simplifyTitle(arg string) (distilled string) {
 	distilled = arg
 
-	distilled = sa.removeSuffixClause(distilled, "(", ")")
-	distilled = sa.removeSuffixClause(distilled, "[", "]")
+	// Repeatedly strip parenthetical/bracketed phrases from the right-side of
+	// the title until they're all gone. We've actually seen some albums be
+	// suffixed with both "(Remastered)" and "(album)".
+	for {
+		distilledThis := sa.removeSuffixClause(distilled, "(", ")")
+		distilledThis = sa.removeSuffixClause(distilledThis, "[", "]")
 
-	return distilled
+		if distilledThis == distilled {
+			return distilled
+		}
+
+		distilled = distilledThis
+	}
 }
 
 func (sa *SpotifyAdapter) isEqual(typeName, arg1, arg2 string, doLiberalSearch bool) (isEqual bool, err error) {
@@ -257,10 +268,12 @@ func (sa *SpotifyAdapter) isEqual(typeName, arg1, arg2 string, doLiberalSearch b
 		// Remove subexpressions that may indicate that this album is a
 		// variation or alternate production rather than the original.
 
-		arg1 = sa.simplifyTitle(arg1)
-		arg2 = sa.simplifyTitle(arg2)
+		distilledArg1 := sa.simplifyTitle(arg1)
+		distilledArg2 := sa.simplifyTitle(arg2)
 
-		if arg1 == arg2 {
+		sLog.Infof(nil, "SIMPLIFY [%s]->[%s] ?= [%s]->[%s]", arg1, distilledArg1, arg2, distilledArg2)
+
+		if distilledArg1 == distilledArg2 {
 			return true, nil
 		}
 	} else {
@@ -504,6 +517,12 @@ func (sa *SpotifyAdapter) getSpotifyTrackId(albumId spotify.ID, name string, doP
 	return spotify.ID(""), nil
 }
 
+type albumHits struct {
+	albumId       spotify.ID
+	foundTracks   map[spotify.ID]string
+	missingTracks []string
+}
+
 func (sa *SpotifyAdapter) GetSpotifyTrackIdsWithNames(artistName string, albumName string, tracks []string, marketName string) (foundTracks map[spotify.ID]string, missingTracks []string, err error) {
 	defer func() {
 		if state := recover(); state != nil {
@@ -514,9 +533,15 @@ func (sa *SpotifyAdapter) GetSpotifyTrackIdsWithNames(artistName string, albumNa
 	artistIds, err := sa.searchSpotifyArtists(artistName)
 	log.PanicIf(err)
 
-	// TODO(dustin): !! IMPORTANT: We should search all matching albums (not just stopping when we find a match) and use theone that has the least number of missing albums. Otherwise, we can hit on special albums but miss the origin albums.
+	hits := make(map[spotify.ID]albumHits)
 
-	// Search for the albums name using a strict string search.
+	// Search for the albums name using a strict string search. Note that we
+	// search within all matching artistsfor album with an exact name (and then
+	// store any such album that has at least one of the tracks we're looking
+	// for) and then proceed to do a fuzzy search for matching albums. We store
+	// this into the same map. We just assume that one artist will nto have two
+	// albums that basically have the same name and thaat a later album has no
+	// chance to replace an earlier one.
 
 	for _, artistId := range artistIds {
 		// Do a strict string search to find the album among the candidates.
@@ -536,7 +561,11 @@ func (sa *SpotifyAdapter) GetSpotifyTrackIdsWithNames(artistName string, albumNa
 			continue
 		}
 
-		return foundTracks, missingTracks, nil
+		hits[artistId] = albumHits{
+			albumId:       albumId,
+			foundTracks:   foundTracks,
+			missingTracks: missingTracks,
+		}
 	}
 
 	// We could find either the album or any of our tracks under this artist.
@@ -560,45 +589,45 @@ func (sa *SpotifyAdapter) GetSpotifyTrackIdsWithNames(artistName string, albumNa
 			continue
 		}
 
-		return foundTracks, missingTracks, nil
-	}
-
-	// If we got as far as searching for tracks, obviously we found at least
-	// one matching artist with one matching album. If we searched for tracks
-	// the `foundTracks` (and `missingTracks`) will be empty rather than `nil`.
-	if foundTracks != nil {
-		return foundTracks, missingTracks, nil
-	}
-
-	// No matching albums were found in any of the matching artists.
-	log.Panic(ErrSpotifyAlbumNotFound)
-	return nil, nil, nil
-}
-
-/*
-func (sa *SpotifyAdapter) GetSpotifyTrackIdWithNames(artistName string, albumName string, trackName string, marketName string) (spotifyTrackId spotify.ID, err error) {
-	defer func() {
-		if state := recover(); state != nil {
-			err = log.Wrap(state.(error))
+		hits[artistId] = albumHits{
+			albumId:       albumId,
+			foundTracks:   foundTracks,
+			missingTracks: missingTracks,
 		}
-	}()
-
-	artistId, err := sa.searchSpotifyArtists(artistName)
-	log.PanicIf(err)
-
-	albumId, err := sa.getSpotifyAlbumId(artistId, albumName, marketName, false, false)
-	if log.Is(err, ErrSpotifyAlbumNotFound) == true {
-		albumId, err = sa.getSpotifyAlbumId(artistId, albumName, marketName, true, true)
-	} else if err != nil {
-		log.Panic(err)
 	}
 
-	trackId, err := sa.getSpotifyTrackId(albumId, trackName, true)
-	log.PanicIf(err)
+	if len(hits) == 0 {
+		// No matching albums were found in any of the matching artists.
+		log.Panic(ErrSpotifyAlbumNotFound)
+		return nil, nil, nil
+	}
 
-	return trackId, nil
+	bestArtistId := spotify.ID("")
+	bestMissingTracks := 0
+
+	hitsLen := len(hits)
+	for artistId, ah := range hits {
+		len_ := len(ah.missingTracks)
+
+		if hitsLen > 0 {
+			sLog.Infof(nil, "HITS: [%s] ([%s]) [%s] ([%s]) MISSING=(%d)", artistName, artistId, albumName, ah.albumId, len_)
+		}
+
+		if bestArtistId != spotify.ID("") && len_ >= bestMissingTracks {
+			continue
+		}
+
+		bestArtistId = artistId
+		bestMissingTracks = len_
+	}
+
+	if hitsLen > 0 {
+		sLog.Infof(nil, "ELECTED ARTIST: [%s]", bestArtistId)
+	}
+
+	ah := hits[bestArtistId]
+	return ah.foundTracks, ah.missingTracks, nil
 }
-*/
 
 func (sa *SpotifyAdapter) ReadSpotifyPlaylist(playlistId spotify.ID, userId string, marketName string) (tracks []spotify.ID, err error) {
 	defer func() {
@@ -608,8 +637,6 @@ func (sa *SpotifyAdapter) ReadSpotifyPlaylist(playlistId spotify.ID, userId stri
 	}()
 
 	sLog.Debugf(sa.ctx, "Reading Spotify playlist.")
-
-	// TODO(dustin): !! Finish refactoring to read all songs by batches.
 
 	offset := 0
 	limit := SpotifyReadBatchSize
@@ -652,6 +679,7 @@ func init() {
 	invalidTrackCharsRx, err = regexp.Compile("[^a-zA-Z0-9']+")
 	log.PanicIf(err)
 
+	// TODO(dustin): Just search-for and replace occurrences of two or more, not just one or more.
 	spaceCharsRx, err = regexp.Compile("[ ]+")
 	log.PanicIf(err)
 }
